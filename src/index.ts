@@ -1,7 +1,8 @@
-import express, { Express, Request, Response, NextFunction } from 'express';
+import express from 'express';
+import type { Express, Request, Response, NextFunction } from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
-import { supabase } from './supabase';
+import { supabase } from './supabase.js';
 
 dotenv.config();
 
