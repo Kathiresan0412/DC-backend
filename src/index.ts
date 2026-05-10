@@ -11,6 +11,7 @@ dotenv.config();
 type AppRole = 'admin' | 'manager' | 'employee';
 type UserStatus = 'active' | 'inactive';
 type CustomerStatus = 'Active' | 'Due' | 'New lead';
+type ServiceStatus = 'Active' | 'Inactive';
 
 type AppUser = {
   _id?: ObjectId;
@@ -44,11 +45,186 @@ type AppCustomer = {
   updated_at: Date;
 };
 
+type AppService = {
+  _id?: ObjectId;
+  name: string;
+  business: string;
+  category: string;
+  description: string;
+  price: number;
+  billing: string;
+  status: ServiceStatus;
+  includes: string[];
+  trustPoints: string[];
+  serviceArea: string;
+  contactPhone: string;
+  secondaryPhone: string;
+  email: string;
+  source: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
 const app: Express = express();
 const port = process.env.PORT || 5000;
 const allowedRoles: AppRole[] = ['admin', 'manager', 'employee'];
 const allowedStatuses: UserStatus[] = ['active', 'inactive'];
 const allowedCustomerStatuses: CustomerStatus[] = ['Active', 'Due', 'New lead'];
+const allowedServiceStatuses: ServiceStatus[] = ['Active', 'Inactive'];
+
+const flyerTrustPoints = [
+  'Complete & modern equipment',
+  'Competitive & affordable price',
+  'Service available 24/7',
+  'Residential & commercial service',
+];
+
+const initialServices: Omit<AppService, '_id' | 'created_at' | 'updated_at'>[] = [
+  {
+    name: 'Snow Blowing',
+    business: 'Frozen Solution',
+    category: 'Snow Removal',
+    description: 'Residential driveway and sidewalk snow blowing service from the Frozen Solution flyer.',
+    price: 400,
+    billing: 'Starting monthly',
+    status: 'Active',
+    includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential driveway & sidewalk'],
+    trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
+    serviceArea: 'Residential driveway & sidewalk',
+    contactPhone: '+1 647-212-3424',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'frozensolutions92@gmail.com',
+    source: 'Snow Removal Service flyer',
+  },
+  {
+    name: 'Snow Plowing',
+    business: 'Frozen Solution',
+    category: 'Snow Removal',
+    description: 'Snow plowing service with modern equipment for residential and commercial properties.',
+    price: 400,
+    billing: 'Starting monthly',
+    status: 'Active',
+    includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential & commercial service'],
+    trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
+    serviceArea: 'Residential driveway & sidewalk',
+    contactPhone: '+1 647-212-3424',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'frozensolutions92@gmail.com',
+    source: 'Snow Removal Service flyer',
+  },
+  {
+    name: 'Snow Shoveling',
+    business: 'Frozen Solution',
+    category: 'Snow Removal',
+    description: 'Manual snow shoveling for walkways, driveways, and service areas.',
+    price: 400,
+    billing: 'Starting monthly',
+    status: 'Active',
+    includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential driveway & sidewalk'],
+    trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
+    serviceArea: 'Residential driveway & sidewalk',
+    contactPhone: '+1 647-212-3424',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'frozensolutions92@gmail.com',
+    source: 'Snow Removal Service flyer',
+  },
+  {
+    name: 'Ice Removal',
+    business: 'Frozen Solution',
+    category: 'Snow Removal',
+    description: 'Ice removal service for safer residential and commercial access.',
+    price: 400,
+    billing: 'Starting monthly',
+    status: 'Active',
+    includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Service available 24/7'],
+    trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
+    serviceArea: 'Residential driveway & sidewalk',
+    contactPhone: '+1 647-212-3424',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'frozensolutions92@gmail.com',
+    source: 'Snow Removal Service flyer',
+  },
+  {
+    name: 'Salting/Sanding',
+    business: 'Frozen Solution',
+    category: 'Snow Removal',
+    description: 'Salting and sanding service to improve traction after snow or ice events.',
+    price: 400,
+    billing: 'Starting monthly',
+    status: 'Active',
+    includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential & commercial service'],
+    trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
+    serviceArea: 'Residential driveway & sidewalk',
+    contactPhone: '+1 647-212-3424',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'frozensolutions92@gmail.com',
+    source: 'Snow Removal Service flyer',
+  },
+  {
+    name: 'Lawn Mowing',
+    business: 'Primecut Services',
+    category: 'Fresh Cut Services',
+    description: 'Fresh cut lawn mowing service from the Primecut Services flyer.',
+    price: 50,
+    billing: 'Starting price',
+    status: 'Active',
+    includes: ['Residential driveway & yard'],
+    trustPoints: flyerTrustPoints,
+    serviceArea: 'Residential driveway & yard',
+    contactPhone: '+1 647-765-0949',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'freshcutservices92@gmail.com',
+    source: 'Fresh Cut Services flyer',
+  },
+  {
+    name: 'Edging',
+    business: 'Primecut Services',
+    category: 'Fresh Cut Services',
+    description: 'Lawn edging for clean borders and finished property lines.',
+    price: 50,
+    billing: 'Starting price',
+    status: 'Active',
+    includes: ['Residential driveway & yard'],
+    trustPoints: flyerTrustPoints,
+    serviceArea: 'Residential driveway & yard',
+    contactPhone: '+1 647-765-0949',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'freshcutservices92@gmail.com',
+    source: 'Fresh Cut Services flyer',
+  },
+  {
+    name: 'Lawn Cleanup',
+    business: 'Primecut Services',
+    category: 'Fresh Cut Services',
+    description: 'General lawn cleanup for residential yards and driveway areas.',
+    price: 50,
+    billing: 'Starting price',
+    status: 'Active',
+    includes: ['Residential driveway & yard'],
+    trustPoints: flyerTrustPoints,
+    serviceArea: 'Residential driveway & yard',
+    contactPhone: '+1 647-765-0949',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'freshcutservices92@gmail.com',
+    source: 'Fresh Cut Services flyer',
+  },
+  {
+    name: 'Fertilization & Weed Control',
+    business: 'Primecut Services',
+    category: 'Fresh Cut Services',
+    description: 'Fertilization and weed control service for healthier lawn care.',
+    price: 50,
+    billing: 'Starting price',
+    status: 'Active',
+    includes: ['Residential driveway & yard'],
+    trustPoints: flyerTrustPoints,
+    serviceArea: 'Residential driveway & yard',
+    contactPhone: '+1 647-765-0949',
+    secondaryPhone: '+1 647-854-5652',
+    email: 'freshcutservices92@gmail.com',
+    source: 'Fresh Cut Services flyer',
+  },
+];
 
 app.use(cors());
 app.use(express.json());
@@ -80,9 +256,20 @@ const customersCollection = async () => {
   return db.collection<AppCustomer>('customers');
 };
 
+const servicesCollection = async () => {
+  const db = await getMongoDb();
+  return db.collection<AppService>('services');
+};
+
 const publicCustomer = (customer: AppCustomer) => ({
   ...customer,
   id: customer._id?.toString() || '',
+  _id: undefined,
+});
+
+const publicService = (service: AppService) => ({
+  ...service,
+  id: service._id?.toString() || '',
   _id: undefined,
 });
 
@@ -119,15 +306,104 @@ const normalizeCustomerPayload = (body: Record<string, unknown>, partial = false
   }
 
   if (!partial) {
-    const requiredFields: Array<keyof AppCustomer> = ['name', 'email', 'phone', 'address', 'business', 'plan', 'status', 'balance', 'lastService'];
+    const requiredFields: Array<keyof AppCustomer> = ['name', 'email', 'phone', 'address', 'status', 'balance'];
     const missingField = requiredFields.find((field) => updates[field] === undefined || updates[field] === '');
 
     if (missingField) {
-      throw new Error('name, email, phone, address, business, plan, status, balance, and lastService are required.');
+      throw new Error('name, email, phone, address, status, and receivable are required.');
     }
   }
 
   return updates;
+};
+
+const normalizeStringArray = (value: unknown) => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return value.split('\n').map((item) => item.trim()).filter(Boolean);
+  }
+
+  return [];
+};
+
+const normalizeServicePayload = (body: Record<string, unknown>, partial = false) => {
+  const updates: Partial<AppService> = {};
+
+  const assignString = (field: keyof Pick<AppService, 'name' | 'business' | 'category' | 'description' | 'billing' | 'serviceArea' | 'contactPhone' | 'secondaryPhone' | 'email' | 'source'>) => {
+    const value = body[field];
+    if (value !== undefined) updates[field] = String(value).trim();
+  };
+
+  assignString('name');
+  assignString('business');
+  assignString('category');
+  assignString('description');
+  assignString('billing');
+  assignString('serviceArea');
+  assignString('contactPhone');
+  assignString('secondaryPhone');
+  assignString('email');
+  assignString('source');
+
+  if (body.status !== undefined) {
+    const status = String(body.status) as ServiceStatus;
+    if (!allowedServiceStatuses.includes(status)) {
+      throw new Error('A valid service status is required.');
+    }
+    updates.status = status;
+  }
+
+  if (body.price !== undefined) {
+    const price = Number(body.price);
+    if (!Number.isFinite(price) || price < 0) {
+      throw new Error('Price must be a valid number.');
+    }
+    updates.price = price;
+  }
+
+  if (body.includes !== undefined) {
+    updates.includes = normalizeStringArray(body.includes);
+  }
+
+  if (body.trustPoints !== undefined) {
+    updates.trustPoints = normalizeStringArray(body.trustPoints);
+  }
+
+  if (!partial) {
+    const requiredFields: Array<keyof AppService> = ['name', 'business', 'category', 'description', 'price', 'billing', 'status', 'serviceArea', 'contactPhone', 'email'];
+    const missingField = requiredFields.find((field) => updates[field] === undefined || updates[field] === '');
+
+    if (missingField) {
+      throw new Error('name, business, category, description, price, billing, status, serviceArea, contactPhone, and email are required.');
+    }
+  }
+
+  return updates;
+};
+
+const seedInitialServices = async () => {
+  const services = await servicesCollection();
+  const existingServices = await services.countDocuments();
+
+  if (existingServices > 0) return;
+
+  const now = new Date();
+  await Promise.all(initialServices.map((service) => (
+    services.updateOne(
+      { name: service.name, business: service.business },
+      {
+        $setOnInsert: {
+          ...service,
+          created_at: now,
+          updated_at: now,
+        },
+      },
+      { upsert: true },
+    )
+  )));
 };
 
 const describeStartupError = (error: unknown) => {
@@ -513,6 +789,91 @@ app.delete('/api/customers/:id', requireAuth, requireRole(['admin', 'manager']),
   res.status(204).send();
 });
 
+app.get('/api/services', requireAuth, async (_req: AuthRequest, res: Response) => {
+  const services = await servicesCollection();
+  const data = await services.find({}).sort({ business: 1, category: 1, name: 1 }).toArray();
+
+  res.json(data.map(publicService));
+});
+
+app.post('/api/services', requireAuth, requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  try {
+    const payload = normalizeServicePayload(req.body);
+    const services = await servicesCollection();
+    const now = new Date();
+    const result = await services.insertOne({
+      name: payload.name || '',
+      business: payload.business || '',
+      category: payload.category || '',
+      description: payload.description || '',
+      price: payload.price || 0,
+      billing: payload.billing || '',
+      status: payload.status || 'Active',
+      includes: payload.includes || [],
+      trustPoints: payload.trustPoints || [],
+      serviceArea: payload.serviceArea || '',
+      contactPhone: payload.contactPhone || '',
+      secondaryPhone: payload.secondaryPhone || '',
+      email: payload.email || '',
+      source: payload.source || 'Manual entry',
+      created_at: now,
+      updated_at: now,
+    });
+    const service = await services.findOne({ _id: result.insertedId });
+
+    res.status(201).json(service ? publicService(service) : null);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to create service.';
+    res.status(400).json({ error: message });
+  }
+});
+
+app.put('/api/services/:id', requireAuth, requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid service id.' });
+  }
+
+  try {
+    const updates = normalizeServicePayload(req.body, true);
+    const services = await servicesCollection();
+
+    await services.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { ...updates, updated_at: new Date() } },
+    );
+
+    const service = await services.findOne({ _id: new ObjectId(id) });
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found.' });
+    }
+
+    res.json(publicService(service));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to update service.';
+    res.status(400).json({ error: message });
+  }
+});
+
+app.delete('/api/services/:id', requireAuth, requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid service id.' });
+  }
+
+  const services = await servicesCollection();
+  const result = await services.deleteOne({ _id: new ObjectId(id) });
+
+  if (result.deletedCount === 0) {
+    return res.status(404).json({ error: 'Service not found.' });
+  }
+
+  res.status(204).send();
+});
+
 const startServer = async () => {
   const server = app.listen(port, () => {
     console.log(`[server]: Server is running at http://localhost:${port}`);
@@ -523,6 +884,8 @@ const startServer = async () => {
     .then(async (db) => {
       await db.collection('users').createIndex({ email: 1 }, { unique: true });
       await db.collection('customers').createIndex({ email: 1 });
+      await db.collection('services').createIndex({ business: 1, name: 1 });
+      await seedInitialServices();
       console.log(`[mongo]: Connected to database ${db.databaseName}`);
     })
     .catch((error) => {
