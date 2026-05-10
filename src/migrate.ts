@@ -22,6 +22,16 @@ const createCollectionIfMissing = async (db: Db, collectionName: string) => {
   });
 };
 
+const dropIndexIfExists = async (db: Db, collectionName: string, indexName: string) => {
+  await db.collection(collectionName).dropIndex(indexName).catch((error: unknown) => {
+    if (error instanceof Error && (error.message.includes('index not found') || error.message.includes('index does not exist'))) {
+      return;
+    }
+
+    throw error;
+  });
+};
+
 const migrate = async () => {
   const db = await connectMongo();
 
@@ -41,7 +51,7 @@ const migrate = async () => {
   await db.collection('services').createIndex({ name: 1, business: 1 }, { unique: true });
   await db.collection('services').createIndex({ business: 1 });
 
-  await db.collection('customers').createIndex({ customer_id: 1 }, { unique: true });
+  await dropIndexIfExists(db, 'customers', 'customer_id_1');
   await db.collection('customers').createIndex({ email: 1 });
   await db.collection('customers').createIndex({ business: 1 });
   await db.collection('customers').createIndex({ status: 1 });

@@ -178,7 +178,7 @@ const publicUser = (user) => ({
     created_at: user.created_at,
     updated_at: user.updated_at,
 });
-const isValidAvatarUrl = (value) => {
+const isValidImageDataUrl = (value) => {
     if (!value)
         return true;
     if (value.length > 1_400_000)
@@ -213,6 +213,14 @@ const activityLogsCollection = async () => {
     const db = await getMongoDb();
     return db.collection('activity_logs');
 };
+const dropIndexIfExists = async (collection, indexName) => {
+    await collection.dropIndex(indexName).catch((error) => {
+        if (error instanceof Error && (error.message.includes('index not found') || error.message.includes('index does not exist'))) {
+            return;
+        }
+        throw error;
+    });
+};
 const publicCustomer = (customer) => ({
     ...customer,
     id: customer._id?.toString() || '',
@@ -222,6 +230,7 @@ const publicService = (service) => ({
     ...service,
     id: service._id?.toString() || '',
     _id: undefined,
+    imageUrl: service.imageUrl || '',
 });
 const publicInvoice = (invoice) => ({
     ...invoice,
@@ -233,6 +242,33 @@ const publicPayment = (payment) => ({
     id: payment._id?.toString() || '',
     _id: undefined,
 });
+const paymentProofHistoryForInvoice = async (invoice) => {
+    const payments = await paymentsCollection();
+    const invoicePayments = await payments
+        .find({ invoice_id: invoice.invoice_id })
+        .sort({ paid_at: 1, created_at: 1 })
+        .toArray();
+    const totalPaymentAmount = invoicePayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+    let runningPaid = Math.max(Number(invoice.paid || 0) - totalPaymentAmount, 0);
+    const proofPayments = invoicePayments.map((payment) => {
+        const paidAmount = Number(payment.amount || 0);
+        runningPaid = Math.min(runningPaid + paidAmount, invoice.amount);
+        return {
+            payment_id: payment.payment_id,
+            method: payment.method,
+            totalAmount: invoice.amount,
+            paidAmount,
+            receivableAmount: Math.max(invoice.amount - runningPaid, 0),
+            generated_at: payment.paid_at,
+            notes: payment.notes,
+        };
+    }).reverse();
+    return proofPayments.length ? proofPayments : (invoice.proofPayment ? [invoice.proofPayment] : []);
+};
+const publicInvoiceWithPaymentHistory = async (invoice) => (publicInvoice({
+    ...invoice,
+    proofPayments: await paymentProofHistoryForInvoice(invoice),
+}));
 const publicActivityLog = (log) => ({
     ...log,
     id: log._id?.toString() || '',
@@ -375,7 +411,11 @@ const normalizeServicePayload = (body, partial = false) => {
     assignString('contactPhone');
     assignString('secondaryPhone');
     assignString('email');
+    assignString('imageUrl');
     assignString('source');
+    if (updates.imageUrl !== undefined && !isValidImageDataUrl(updates.imageUrl)) {
+        throw new Error('Service image must be a PNG, JPG, WebP, or GIF under 1MB.');
+    }
     if (body.status !== undefined) {
         const status = String(body.status);
         if (!allowedServiceStatuses.includes(status)) {
@@ -608,7 +648,7 @@ app.put('/api/profile', requireAuth, async (req, res) => {
     const users = await usersCollection();
     const updatedAt = new Date();
     const avatarUrl = typeof avatar_url === 'string' ? avatar_url : req.user.avatar_url || '';
-    if (!isValidAvatarUrl(avatarUrl)) {
+    if (!isValidImageDataUrl(avatarUrl)) {
         return res.status(400).json({ error: 'Profile image must be a PNG, JPG, WebP, or GIF under 1MB.' });
     }
     await users.updateOne({ _id: req.user._id }, {
@@ -1064,6 +1104,7 @@ app.post('/api/services', requireAuth, requireRole(['admin', 'manager']), async 
             contactPhone: payload.contactPhone || '',
             secondaryPhone: payload.secondaryPhone || '',
             email: payload.email || '',
+            imageUrl: payload.imageUrl || '',
             source: payload.source || 'Manual entry',
             created_at: now,
             updated_at: now,
@@ -1151,7 +1192,7 @@ app.delete('/api/services/:id', requireAuth, requireRole(['admin', 'manager']), 
     });
     res.status(204).send();
 });
-app.get('/api/invoices', requireAuth, async (_req, res) => {
+app.get('/api/invoices', requireAuth, requireRole(['admin', 'manager']), async (_req, res) => {
     const invoices = await invoicesCollection();
     const data = await invoices.find({}).sort({ created_at: -1 }).toArray();
     res.json(data.map(publicInvoice));
@@ -1271,7 +1312,7 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
     });
     res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email });
 });
-app.get('/api/payments', requireAuth, async (_req, res) => {
+app.get('/api/payments', requireAuth, requireRole(['admin', 'manager']), async (_req, res) => {
     const payments = await paymentsCollection();
     const data = await payments.find({}).sort({ paid_at: -1, created_at: -1 }).toArray();
     res.json(data.map(publicPayment));
@@ -1379,7 +1420,7 @@ app.get('/api/public/invoices/:invoiceId', async (req, res) => {
     if (!invoice) {
         return res.status(404).json({ error: 'Invoice not found.' });
     }
-    res.json(publicInvoice(invoice));
+    res.json(await publicInvoiceWithPaymentHistory(invoice));
 });
 app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
     const invoices = await invoicesCollection();
@@ -1391,11 +1432,8 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
     }
     const currentPaid = Number(invoice.paid || 0);
     const currentReceivable = Math.max(invoice.amount - currentPaid, 0);
-    const paidAmount = Number(req.body.paidAmount ?? currentReceivable);
+    const paidAmount = currentReceivable;
     const feedback = String(req.body.feedback || '').trim();
-    if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > currentReceivable) {
-        return res.status(400).json({ error: 'Paid amount must be between 0 and the current receivable amount.' });
-    }
     const totalPaid = Math.min(currentPaid + paidAmount, invoice.amount);
     const receivableAmount = Math.max(invoice.amount - totalPaid, 0);
     const now = new Date();
@@ -1521,7 +1559,7 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
         });
     }
     const updatedInvoice = await invoices.findOne({ _id: invoice._id });
-    res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email: paymentSlipEmail });
+    res.json({ invoice: updatedInvoice ? await publicInvoiceWithPaymentHistory(updatedInvoice) : null, email: paymentSlipEmail });
 });
 const startServer = async () => {
     const server = app.listen(port, () => {
@@ -1531,6 +1569,7 @@ const startServer = async () => {
     connectMongo()
         .then(async (db) => {
         await db.collection('users').createIndex({ email: 1 }, { unique: true });
+        await dropIndexIfExists(db.collection('customers'), 'customer_id_1');
         await db.collection('customers').createIndex({ email: 1 });
         await db.collection('services').createIndex({ business: 1, name: 1 });
         await db.collection('invoices').createIndex({ invoice_id: 1 }, { unique: true });

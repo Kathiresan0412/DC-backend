@@ -62,6 +62,7 @@ type AppService = {
   contactPhone: string;
   secondaryPhone: string;
   email: string;
+  imageUrl?: string;
   source: string;
   created_at: Date;
   updated_at: Date;
@@ -73,6 +74,16 @@ type EmailLog = {
   subject: string;
   body: string;
   sent_at: Date;
+};
+
+type ProofPayment = {
+  payment_id?: string;
+  method?: string;
+  totalAmount: number;
+  paidAmount: number;
+  receivableAmount: number;
+  generated_at: Date;
+  notes?: string;
 };
 
 type AppInvoice = {
@@ -93,12 +104,8 @@ type AppInvoice = {
   agreementLink: string;
   feedback: string;
   confirmed_at?: Date;
-  proofPayment?: {
-    totalAmount: number;
-    paidAmount: number;
-    receivableAmount: number;
-    generated_at: Date;
-  };
+  proofPayment?: ProofPayment;
+  proofPayments?: ProofPayment[];
   emails: EmailLog[];
   created_at: Date;
   updated_at: Date;
@@ -328,7 +335,7 @@ const publicUser = (user: AppUser) => ({
   updated_at: user.updated_at,
 });
 
-const isValidAvatarUrl = (value: string) => {
+const isValidImageDataUrl = (value: string) => {
   if (!value) return true;
   if (value.length > 1_400_000) return false;
 
@@ -370,6 +377,16 @@ const activityLogsCollection = async () => {
   return db.collection<AppActivityLog>('activity_logs');
 };
 
+const dropIndexIfExists = async (collection: { dropIndex: (indexName: string) => Promise<unknown> }, indexName: string) => {
+  await collection.dropIndex(indexName).catch((error: unknown) => {
+    if (error instanceof Error && (error.message.includes('index not found') || error.message.includes('index does not exist'))) {
+      return;
+    }
+
+    throw error;
+  });
+};
+
 const publicCustomer = (customer: AppCustomer) => ({
   ...customer,
   id: customer._id?.toString() || '',
@@ -380,6 +397,7 @@ const publicService = (service: AppService) => ({
   ...service,
   id: service._id?.toString() || '',
   _id: undefined,
+  imageUrl: service.imageUrl || '',
 });
 
 const publicInvoice = (invoice: AppInvoice) => ({
@@ -393,6 +411,41 @@ const publicPayment = (payment: AppPayment) => ({
   id: payment._id?.toString() || '',
   _id: undefined,
 });
+
+const paymentProofHistoryForInvoice = async (invoice: AppInvoice): Promise<ProofPayment[]> => {
+  const payments = await paymentsCollection();
+  const invoicePayments = await payments
+    .find({ invoice_id: invoice.invoice_id })
+    .sort({ paid_at: 1, created_at: 1 })
+    .toArray();
+
+  const totalPaymentAmount = invoicePayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  let runningPaid = Math.max(Number(invoice.paid || 0) - totalPaymentAmount, 0);
+
+  const proofPayments = invoicePayments.map((payment) => {
+    const paidAmount = Number(payment.amount || 0);
+    runningPaid = Math.min(runningPaid + paidAmount, invoice.amount);
+
+    return {
+      payment_id: payment.payment_id,
+      method: payment.method,
+      totalAmount: invoice.amount,
+      paidAmount,
+      receivableAmount: Math.max(invoice.amount - runningPaid, 0),
+      generated_at: payment.paid_at,
+      notes: payment.notes,
+    };
+  }).reverse();
+
+  return proofPayments.length ? proofPayments : (invoice.proofPayment ? [invoice.proofPayment] : []);
+};
+
+const publicInvoiceWithPaymentHistory = async (invoice: AppInvoice) => (
+  publicInvoice({
+    ...invoice,
+    proofPayments: await paymentProofHistoryForInvoice(invoice),
+  })
+);
 
 const publicActivityLog = (log: AppActivityLog) => ({
   ...log,
@@ -580,7 +633,7 @@ const normalizeStringArray = (value: unknown) => {
 const normalizeServicePayload = (body: Record<string, unknown>, partial = false) => {
   const updates: Partial<AppService> = {};
 
-  const assignString = (field: keyof Pick<AppService, 'name' | 'business' | 'category' | 'description' | 'billing' | 'serviceArea' | 'contactPhone' | 'secondaryPhone' | 'email' | 'source'>) => {
+  const assignString = (field: keyof Pick<AppService, 'name' | 'business' | 'category' | 'description' | 'billing' | 'serviceArea' | 'contactPhone' | 'secondaryPhone' | 'email' | 'imageUrl' | 'source'>) => {
     const value = body[field];
     if (value !== undefined) updates[field] = String(value).trim();
   };
@@ -594,7 +647,12 @@ const normalizeServicePayload = (body: Record<string, unknown>, partial = false)
   assignString('contactPhone');
   assignString('secondaryPhone');
   assignString('email');
+  assignString('imageUrl');
   assignString('source');
+
+  if (updates.imageUrl !== undefined && !isValidImageDataUrl(updates.imageUrl)) {
+    throw new Error('Service image must be a PNG, JPG, WebP, or GIF under 1MB.');
+  }
 
   if (body.status !== undefined) {
     const status = String(body.status) as ServiceStatus;
@@ -901,7 +959,7 @@ app.put('/api/profile', requireAuth, async (req: AuthRequest, res: Response) => 
   const updatedAt = new Date();
   const avatarUrl = typeof avatar_url === 'string' ? avatar_url : req.user.avatar_url || '';
 
-  if (!isValidAvatarUrl(avatarUrl)) {
+  if (!isValidImageDataUrl(avatarUrl)) {
     return res.status(400).json({ error: 'Profile image must be a PNG, JPG, WebP, or GIF under 1MB.' });
   }
 
@@ -1421,6 +1479,7 @@ app.post('/api/services', requireAuth, requireRole(['admin', 'manager']), async 
       contactPhone: payload.contactPhone || '',
       secondaryPhone: payload.secondaryPhone || '',
       email: payload.email || '',
+      imageUrl: payload.imageUrl || '',
       source: payload.source || 'Manual entry',
       created_at: now,
       updated_at: now,
@@ -1523,7 +1582,7 @@ app.delete('/api/services/:id', requireAuth, requireRole(['admin', 'manager']), 
   res.status(204).send();
 });
 
-app.get('/api/invoices', requireAuth, async (_req: AuthRequest, res: Response) => {
+app.get('/api/invoices', requireAuth, requireRole(['admin', 'manager']), async (_req: AuthRequest, res: Response) => {
   const invoices = await invoicesCollection();
   const data = await invoices.find({}).sort({ created_at: -1 }).toArray();
 
@@ -1657,7 +1716,7 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
   res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email });
 });
 
-app.get('/api/payments', requireAuth, async (_req: AuthRequest, res: Response) => {
+app.get('/api/payments', requireAuth, requireRole(['admin', 'manager']), async (_req: AuthRequest, res: Response) => {
   const payments = await paymentsCollection();
   const data = await payments.find({}).sort({ paid_at: -1, created_at: -1 }).toArray();
 
@@ -1782,7 +1841,7 @@ app.get('/api/public/invoices/:invoiceId', async (req: Request, res: Response) =
     return res.status(404).json({ error: 'Invoice not found.' });
   }
 
-  res.json(publicInvoice(invoice));
+  res.json(await publicInvoiceWithPaymentHistory(invoice));
 });
 
 app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Response) => {
@@ -1797,12 +1856,8 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Re
 
   const currentPaid = Number(invoice.paid || 0);
   const currentReceivable = Math.max(invoice.amount - currentPaid, 0);
-  const paidAmount = Number(req.body.paidAmount ?? currentReceivable);
+  const paidAmount = currentReceivable;
   const feedback = String(req.body.feedback || '').trim();
-
-  if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > currentReceivable) {
-    return res.status(400).json({ error: 'Paid amount must be between 0 and the current receivable amount.' });
-  }
 
   const totalPaid = Math.min(currentPaid + paidAmount, invoice.amount);
   const receivableAmount = Math.max(invoice.amount - totalPaid, 0);
@@ -1939,7 +1994,7 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Re
   }
 
   const updatedInvoice = await invoices.findOne({ _id: invoice._id });
-  res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email: paymentSlipEmail });
+  res.json({ invoice: updatedInvoice ? await publicInvoiceWithPaymentHistory(updatedInvoice) : null, email: paymentSlipEmail });
 });
 
 const startServer = async () => {
@@ -1951,6 +2006,7 @@ const startServer = async () => {
   connectMongo()
     .then(async (db) => {
       await db.collection('users').createIndex({ email: 1 }, { unique: true });
+      await dropIndexIfExists(db.collection('customers'), 'customer_id_1');
       await db.collection('customers').createIndex({ email: 1 });
       await db.collection('services').createIndex({ business: 1, name: 1 });
       await db.collection('invoices').createIndex({ invoice_id: 1 }, { unique: true });
