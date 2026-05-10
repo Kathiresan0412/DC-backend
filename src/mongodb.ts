@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const uri = process.env.MONGODB_URI || '';
+const dbName = process.env.MONGODB_DB_NAME || 'primozen';
 
 let client: MongoClient | null = null;
 let db: Db | null = null;
@@ -21,7 +22,7 @@ export const connectMongo = async () => {
     serverSelectionTimeoutMS: 5_000,
   });
   await client.connect();
-  db = client.db('servicehub');
+  db = client.db(dbName);
 
   return db;
 };
