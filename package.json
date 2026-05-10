@@ -7,6 +7,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon src/index.ts",
     "build": "tsc",
+    "db:migrate": "npm run build && node src/migrate.js",
     "seed:admin": "npm run build && node src/seed-admin.js",
     "start": "node dist/index.js"
   },

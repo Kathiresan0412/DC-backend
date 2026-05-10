@@ -2,7 +2,6 @@ import { MongoClient } from 'mongodb';
 import dotenv from 'dotenv';
 dotenv.config();
 const uri = process.env.MONGODB_URI || '';
-const dbName = process.env.MONGODB_DB || 'servicehub';
 let client = null;
 let db = null;
 export const connectMongo = async () => {
@@ -16,7 +15,7 @@ export const connectMongo = async () => {
         serverSelectionTimeoutMS: 5_000,
     });
     await client.connect();
-    db = client.db(dbName);
+    db = client.db('servicehub');
     return db;
 };
 export const getMongoDb = async () => {
