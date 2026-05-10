@@ -9,6 +9,7 @@ const app = express();
 const port = process.env.PORT || 5000;
 const allowedRoles = ['admin', 'manager', 'employee'];
 const allowedStatuses = ['active', 'inactive'];
+const allowedCustomerStatuses = ['Active', 'Due', 'New lead'];
 app.use(cors());
 app.use(express.json());
 const publicUser = (user) => ({
@@ -29,6 +30,52 @@ const usersCollection = async () => {
 const itemsCollection = async () => {
     const db = await getMongoDb();
     return db.collection('items');
+};
+const customersCollection = async () => {
+    const db = await getMongoDb();
+    return db.collection('customers');
+};
+const publicCustomer = (customer) => ({
+    ...customer,
+    id: customer._id?.toString() || '',
+    _id: undefined,
+});
+const normalizeCustomerPayload = (body, partial = false) => {
+    const updates = {};
+    const assignString = (field) => {
+        const value = body[field];
+        if (value !== undefined)
+            updates[field] = String(value).trim();
+    };
+    assignString('name');
+    assignString('email');
+    assignString('phone');
+    assignString('address');
+    assignString('business');
+    assignString('plan');
+    assignString('lastService');
+    if (body.status !== undefined) {
+        const status = String(body.status);
+        if (!allowedCustomerStatuses.includes(status)) {
+            throw new Error('A valid customer status is required.');
+        }
+        updates.status = status;
+    }
+    if (body.balance !== undefined) {
+        const balance = Number(body.balance);
+        if (!Number.isFinite(balance) || balance < 0) {
+            throw new Error('Balance must be a valid number.');
+        }
+        updates.balance = balance;
+    }
+    if (!partial) {
+        const requiredFields = ['name', 'email', 'phone', 'address', 'business', 'plan', 'status', 'balance', 'lastService'];
+        const missingField = requiredFields.find((field) => updates[field] === undefined || updates[field] === '');
+        if (missingField) {
+            throw new Error('name, email, phone, address, business, plan, status, balance, and lastService are required.');
+        }
+    }
+    return updates;
 };
 const describeStartupError = (error) => {
     const message = error instanceof Error ? error.message : 'Failed to connect to MongoDB.';
@@ -265,6 +312,69 @@ app.delete('/api/items/:id', requireAuth, requireRole(['admin', 'manager']), asy
     await items.deleteOne({ _id: new ObjectId(id) });
     res.status(204).send();
 });
+app.get('/api/customers', requireAuth, async (_req, res) => {
+    const customers = await customersCollection();
+    const data = await customers.find({}).sort({ created_at: -1 }).toArray();
+    res.json(data.map(publicCustomer));
+});
+app.post('/api/customers', requireAuth, requireRole(['admin', 'manager']), async (req, res) => {
+    try {
+        const payload = normalizeCustomerPayload(req.body);
+        const customers = await customersCollection();
+        const now = new Date();
+        const result = await customers.insertOne({
+            name: payload.name || '',
+            email: payload.email || '',
+            phone: payload.phone || '',
+            address: payload.address || '',
+            business: payload.business || '',
+            plan: payload.plan || '',
+            status: payload.status || 'Active',
+            balance: payload.balance || 0,
+            lastService: payload.lastService || '',
+            created_at: now,
+            updated_at: now,
+        });
+        const customer = await customers.findOne({ _id: result.insertedId });
+        res.status(201).json(customer ? publicCustomer(customer) : null);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to create customer.';
+        res.status(400).json({ error: message });
+    }
+});
+app.put('/api/customers/:id', requireAuth, requireRole(['admin', 'manager']), async (req, res) => {
+    const id = String(req.params.id);
+    if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: 'Invalid customer id.' });
+    }
+    try {
+        const updates = normalizeCustomerPayload(req.body, true);
+        const customers = await customersCollection();
+        await customers.updateOne({ _id: new ObjectId(id) }, { $set: { ...updates, updated_at: new Date() } });
+        const customer = await customers.findOne({ _id: new ObjectId(id) });
+        if (!customer) {
+            return res.status(404).json({ error: 'Customer not found.' });
+        }
+        res.json(publicCustomer(customer));
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to update customer.';
+        res.status(400).json({ error: message });
+    }
+});
+app.delete('/api/customers/:id', requireAuth, requireRole(['admin', 'manager']), async (req, res) => {
+    const id = String(req.params.id);
+    if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: 'Invalid customer id.' });
+    }
+    const customers = await customersCollection();
+    const result = await customers.deleteOne({ _id: new ObjectId(id) });
+    if (result.deletedCount === 0) {
+        return res.status(404).json({ error: 'Customer not found.' });
+    }
+    res.status(204).send();
+});
 const startServer = async () => {
     const server = app.listen(port, () => {
         console.log(`[server]: Server is running at http://localhost:${port}`);
@@ -273,6 +383,7 @@ const startServer = async () => {
     connectMongo()
         .then(async (db) => {
         await db.collection('users').createIndex({ email: 1 }, { unique: true });
+        await db.collection('customers').createIndex({ email: 1 });
         console.log(`[mongo]: Connected to database ${db.databaseName}`);
     })
         .catch((error) => {
