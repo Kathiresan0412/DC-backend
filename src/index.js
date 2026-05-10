@@ -197,6 +197,10 @@ const invoicesCollection = async () => {
     const db = await getMongoDb();
     return db.collection('invoices');
 };
+const paymentsCollection = async () => {
+    const db = await getMongoDb();
+    return db.collection('payments');
+};
 const publicCustomer = (customer) => ({
     ...customer,
     id: customer._id?.toString() || '',
@@ -210,6 +214,11 @@ const publicService = (service) => ({
 const publicInvoice = (invoice) => ({
     ...invoice,
     id: invoice._id?.toString() || '',
+    _id: undefined,
+});
+const publicPayment = (payment) => ({
+    ...payment,
+    id: payment._id?.toString() || '',
     _id: undefined,
 });
 const formatMoney = (value) => (new Intl.NumberFormat('en-CA', {
@@ -354,6 +363,33 @@ const nextInvoiceId = async () => {
     const count = await invoices.countDocuments();
     const year = new Date().getFullYear();
     return `INV-${year}-${String(count + 1).padStart(3, '0')}`;
+};
+const nextPaymentId = async () => {
+    const payments = await paymentsCollection();
+    const count = await payments.countDocuments();
+    const year = new Date().getFullYear();
+    return `PAY-${year}-${String(count + 1).padStart(4, '0')}`;
+};
+const normalizePaymentPayload = (body) => {
+    const invoiceId = String(body.invoiceId || '').trim();
+    const method = String(body.method || 'E-transfer').trim();
+    const amount = Number(body.amount);
+    const paidAtValue = String(body.paid_at || '').trim();
+    const notes = String(body.notes || '').trim();
+    if (!invoiceId) {
+        throw new Error('Invoice is required.');
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+        throw new Error('Payment amount must be greater than 0.');
+    }
+    if (!method) {
+        throw new Error('Payment method is required.');
+    }
+    const paidAt = paidAtValue ? new Date(`${paidAtValue}T00:00:00`) : new Date();
+    if (Number.isNaN(paidAt.getTime())) {
+        throw new Error('Payment date is invalid.');
+    }
+    return { invoiceId, method, amount, paidAt, notes };
 };
 const seedInitialServices = async () => {
     const services = await servicesCollection();
@@ -810,6 +846,80 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
     const updatedInvoice = await invoices.findOne({ _id: invoice._id });
     res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email });
 });
+app.get('/api/payments', requireAuth, async (_req, res) => {
+    const payments = await paymentsCollection();
+    const data = await payments.find({}).sort({ paid_at: -1, created_at: -1 }).toArray();
+    res.json(data.map(publicPayment));
+});
+app.post('/api/payments', requireAuth, requireRole(['admin', 'manager']), async (req, res) => {
+    try {
+        const payload = normalizePaymentPayload(req.body);
+        const invoices = await invoicesCollection();
+        const payments = await paymentsCollection();
+        const invoice = await invoices.findOne({
+            $or: [
+                { invoice_id: payload.invoiceId },
+                ...(ObjectId.isValid(payload.invoiceId) ? [{ _id: new ObjectId(payload.invoiceId) }] : []),
+            ],
+        });
+        if (!invoice) {
+            return res.status(404).json({ error: 'Invoice not found.' });
+        }
+        if (payload.amount > invoice.receivable) {
+            return res.status(400).json({ error: 'Payment amount cannot exceed the invoice receivable.' });
+        }
+        const now = new Date();
+        const paymentId = await nextPaymentId();
+        const paid = Math.min(invoice.paid + payload.amount, invoice.amount);
+        const receivable = Math.max(invoice.amount - paid, 0);
+        const result = await payments.insertOne({
+            payment_id: paymentId,
+            invoiceId: invoice._id?.toString() || '',
+            invoice_id: invoice.invoice_id,
+            customerId: invoice.customerId,
+            customer: invoice.customer,
+            email: invoice.email,
+            business: invoice.business,
+            service: invoice.service,
+            method: payload.method,
+            amount: payload.amount,
+            paid_at: payload.paidAt,
+            date: formatDate(payload.paidAt),
+            notes: payload.notes,
+            created_at: now,
+            updated_at: now,
+        });
+        await invoices.updateOne({ _id: invoice._id }, {
+            $set: {
+                paid,
+                receivable,
+                status: receivable === 0 ? 'Paid' : 'Confirmed',
+                updated_at: now,
+            },
+        });
+        if (ObjectId.isValid(invoice.customerId)) {
+            const customers = await customersCollection();
+            await customers.updateOne({ _id: new ObjectId(invoice.customerId) }, {
+                $set: {
+                    balance: receivable,
+                    status: receivable > 0 ? 'Due' : 'Active',
+                    lastService: `${formatDate(now)} - ${invoice.service}`,
+                    updated_at: now,
+                },
+            });
+        }
+        const payment = await payments.findOne({ _id: result.insertedId });
+        const updatedInvoice = await invoices.findOne({ _id: invoice._id });
+        res.status(201).json({
+            payment: payment ? publicPayment(payment) : null,
+            invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null,
+        });
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to record payment.';
+        res.status(400).json({ error: message });
+    }
+});
 app.get('/api/public/invoices/:invoiceId', async (req, res) => {
     const invoices = await invoicesCollection();
     const invoice = await invoices.findOne({ invoice_id: String(req.params.invoiceId) });
@@ -821,6 +931,7 @@ app.get('/api/public/invoices/:invoiceId', async (req, res) => {
 app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
     const invoices = await invoicesCollection();
     const customers = await customersCollection();
+    const payments = await paymentsCollection();
     const invoice = await invoices.findOne({ invoice_id: String(req.params.invoiceId) });
     if (!invoice) {
         return res.status(404).json({ error: 'Invoice not found.' });
@@ -863,6 +974,28 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
         },
         $push: { emails: paymentSlipEmail },
     });
+    if (paidAmount > 0) {
+        const existingPayment = await payments.findOne({ invoice_id: invoice.invoice_id });
+        if (!existingPayment) {
+            await payments.insertOne({
+                payment_id: await nextPaymentId(),
+                invoiceId: invoice._id?.toString() || '',
+                invoice_id: invoice.invoice_id,
+                customerId: invoice.customerId,
+                customer: invoice.customer,
+                email: invoice.email,
+                business: invoice.business,
+                service: invoice.service,
+                method: 'Customer confirmation',
+                amount: paidAmount,
+                paid_at: now,
+                date: formatDate(now),
+                notes: feedback,
+                created_at: now,
+                updated_at: now,
+            });
+        }
+    }
     if (ObjectId.isValid(invoice.customerId)) {
         await customers.updateOne({ _id: new ObjectId(invoice.customerId) }, {
             $set: {
