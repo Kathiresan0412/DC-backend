@@ -165,7 +165,7 @@ const initialServices = [
     },
 ];
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 const publicUser = (user) => ({
     id: user._id?.toString() || '',
     email: user.email,
@@ -174,9 +174,17 @@ const publicUser = (user) => ({
     status: user.status,
     phone: user.phone || '',
     bio: user.bio || '',
+    avatar_url: user.avatar_url || '',
     created_at: user.created_at,
     updated_at: user.updated_at,
 });
+const isValidAvatarUrl = (value) => {
+    if (!value)
+        return true;
+    if (value.length > 1_400_000)
+        return false;
+    return /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value);
+};
 const usersCollection = async () => {
     const db = await getMongoDb();
     return db.collection('users');
@@ -530,14 +538,19 @@ app.put('/api/profile', requireAuth, async (req, res) => {
     if (!req.user?._id) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
-    const { full_name, phone, bio } = req.body;
+    const { full_name, phone, bio, avatar_url } = req.body;
     const users = await usersCollection();
     const updatedAt = new Date();
+    const avatarUrl = typeof avatar_url === 'string' ? avatar_url : req.user.avatar_url || '';
+    if (!isValidAvatarUrl(avatarUrl)) {
+        return res.status(400).json({ error: 'Profile image must be a PNG, JPG, WebP, or GIF under 1MB.' });
+    }
     await users.updateOne({ _id: req.user._id }, {
         $set: {
             full_name: full_name || req.user.full_name,
             phone: phone || '',
             bio: bio || '',
+            avatar_url: avatarUrl,
             updated_at: updatedAt,
         },
     });
@@ -968,12 +981,15 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
     if (!invoice) {
         return res.status(404).json({ error: 'Invoice not found.' });
     }
-    const paidAmount = Number(req.body.paidAmount ?? invoice.amount);
+    const currentPaid = Number(invoice.paid || 0);
+    const currentReceivable = Math.max(invoice.amount - currentPaid, 0);
+    const paidAmount = Number(req.body.paidAmount ?? currentReceivable);
     const feedback = String(req.body.feedback || '').trim();
-    if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > invoice.amount) {
-        return res.status(400).json({ error: 'Paid amount must be between 0 and the total amount.' });
+    if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > currentReceivable) {
+        return res.status(400).json({ error: 'Paid amount must be between 0 and the current receivable amount.' });
     }
-    const receivableAmount = Math.max(invoice.amount - paidAmount, 0);
+    const totalPaid = Math.min(currentPaid + paidAmount, invoice.amount);
+    const receivableAmount = Math.max(invoice.amount - totalPaid, 0);
     const now = new Date();
     const proofPayment = {
         totalAmount: invoice.amount,
@@ -996,7 +1012,7 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
     });
     await invoices.updateOne({ _id: invoice._id }, {
         $set: {
-            paid: paidAmount,
+            paid: totalPaid,
             receivable: receivableAmount,
             status: receivableAmount === 0 ? 'Paid' : 'Confirmed',
             feedback,
@@ -1007,26 +1023,23 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
         $push: { emails: paymentSlipEmail },
     });
     if (paidAmount > 0) {
-        const existingPayment = await payments.findOne({ invoice_id: invoice.invoice_id });
-        if (!existingPayment) {
-            await payments.insertOne({
-                payment_id: await nextPaymentId(),
-                invoiceId: invoice._id?.toString() || '',
-                invoice_id: invoice.invoice_id,
-                customerId: invoice.customerId,
-                customer: invoice.customer,
-                email: invoice.email,
-                business: invoice.business,
-                service: invoice.service,
-                method: 'Customer confirmation',
-                amount: paidAmount,
-                paid_at: now,
-                date: formatDate(now),
-                notes: feedback,
-                created_at: now,
-                updated_at: now,
-            });
-        }
+        await payments.insertOne({
+            payment_id: await nextPaymentId(),
+            invoiceId: invoice._id?.toString() || '',
+            invoice_id: invoice.invoice_id,
+            customerId: invoice.customerId,
+            customer: invoice.customer,
+            email: invoice.email,
+            business: invoice.business,
+            service: invoice.service,
+            method: 'Customer confirmation',
+            amount: paidAmount,
+            paid_at: now,
+            date: formatDate(now),
+            notes: feedback,
+            created_at: now,
+            updated_at: now,
+        });
     }
     if (ObjectId.isValid(invoice.customerId)) {
         await customers.updateOne({ _id: new ObjectId(invoice.customerId) }, {

@@ -303,7 +303,7 @@ const publicUser = (user: AppUser) => ({
 
 const isValidAvatarUrl = (value: string) => {
   if (!value) return true;
-  if (value.length > 1_000_000) return false;
+  if (value.length > 1_400_000) return false;
 
   return /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value);
 };
@@ -1322,14 +1322,17 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Re
     return res.status(404).json({ error: 'Invoice not found.' });
   }
 
-  const paidAmount = Number(req.body.paidAmount ?? invoice.amount);
+  const currentPaid = Number(invoice.paid || 0);
+  const currentReceivable = Math.max(invoice.amount - currentPaid, 0);
+  const paidAmount = Number(req.body.paidAmount ?? currentReceivable);
   const feedback = String(req.body.feedback || '').trim();
 
-  if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > invoice.amount) {
-    return res.status(400).json({ error: 'Paid amount must be between 0 and the total amount.' });
+  if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > currentReceivable) {
+    return res.status(400).json({ error: 'Paid amount must be between 0 and the current receivable amount.' });
   }
 
-  const receivableAmount = Math.max(invoice.amount - paidAmount, 0);
+  const totalPaid = Math.min(currentPaid + paidAmount, invoice.amount);
+  const receivableAmount = Math.max(invoice.amount - totalPaid, 0);
   const now = new Date();
   const proofPayment = {
     totalAmount: invoice.amount,
@@ -1355,7 +1358,7 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Re
     { _id: invoice._id },
     {
       $set: {
-        paid: paidAmount,
+        paid: totalPaid,
         receivable: receivableAmount,
         status: receivableAmount === 0 ? 'Paid' : 'Confirmed',
         feedback,
@@ -1368,27 +1371,23 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Re
   );
 
   if (paidAmount > 0) {
-    const existingPayment = await payments.findOne({ invoice_id: invoice.invoice_id });
-
-    if (!existingPayment) {
-      await payments.insertOne({
-        payment_id: await nextPaymentId(),
-        invoiceId: invoice._id?.toString() || '',
-        invoice_id: invoice.invoice_id,
-        customerId: invoice.customerId,
-        customer: invoice.customer,
-        email: invoice.email,
-        business: invoice.business,
-        service: invoice.service,
-        method: 'Customer confirmation',
-        amount: paidAmount,
-        paid_at: now,
-        date: formatDate(now),
-        notes: feedback,
-        created_at: now,
-        updated_at: now,
-      });
-    }
+    await payments.insertOne({
+      payment_id: await nextPaymentId(),
+      invoiceId: invoice._id?.toString() || '',
+      invoice_id: invoice.invoice_id,
+      customerId: invoice.customerId,
+      customer: invoice.customer,
+      email: invoice.email,
+      business: invoice.business,
+      service: invoice.service,
+      method: 'Customer confirmation',
+      amount: paidAmount,
+      paid_at: now,
+      date: formatDate(now),
+      notes: feedback,
+      created_at: now,
+      updated_at: now,
+    });
   }
 
   if (ObjectId.isValid(invoice.customerId)) {

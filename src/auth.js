@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 const scrypt = promisify(scryptCallback);
 const jwtSecret = process.env.JWT_SECRET || 'change-this-secret';
+const tokenLifetimeSeconds = 60 * 60 * 24 * 3;
 const base64Url = (value) => Buffer
     .from(value)
     .toString('base64url');
@@ -25,7 +26,7 @@ export const signToken = (payload) => {
     const header = base64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
     const body = base64Url(JSON.stringify({
         ...payload,
-        exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24,
+        exp: Math.floor(Date.now() / 1000) + tokenLifetimeSeconds,
     }));
     const signature = createHmac('sha256', jwtSecret)
         .update(`${header}.${body}`)
