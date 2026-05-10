@@ -12,6 +12,7 @@ type AppRole = 'admin' | 'manager' | 'employee';
 type UserStatus = 'active' | 'inactive';
 type CustomerStatus = 'Active' | 'Due' | 'New lead';
 type ServiceStatus = 'Active' | 'Inactive';
+type InvoiceStatus = 'Draft' | 'Sent' | 'Confirmed' | 'Paid' | 'Due' | 'Overdue';
 
 type AppUser = {
   _id?: ObjectId;
@@ -65,12 +66,50 @@ type AppService = {
   updated_at: Date;
 };
 
+type EmailLog = {
+  type: 'invoice' | 'payment_slip';
+  to: string;
+  subject: string;
+  body: string;
+  sent_at: Date;
+};
+
+type AppInvoice = {
+  _id?: ObjectId;
+  invoice_id: string;
+  customerId: string;
+  customer: string;
+  email: string;
+  business: string;
+  serviceId: string;
+  service: string;
+  issued: string;
+  due: string;
+  amount: number;
+  paid: number;
+  receivable: number;
+  status: InvoiceStatus;
+  agreementLink: string;
+  feedback: string;
+  confirmed_at?: Date;
+  proofPayment?: {
+    totalAmount: number;
+    paidAmount: number;
+    receivableAmount: number;
+    generated_at: Date;
+  };
+  emails: EmailLog[];
+  created_at: Date;
+  updated_at: Date;
+};
+
 const app: Express = express();
 const port = process.env.PORT || 5000;
 const allowedRoles: AppRole[] = ['admin', 'manager', 'employee'];
 const allowedStatuses: UserStatus[] = ['active', 'inactive'];
 const allowedCustomerStatuses: CustomerStatus[] = ['Active', 'Due', 'New lead'];
 const allowedServiceStatuses: ServiceStatus[] = ['Active', 'Inactive'];
+const allowedInvoiceStatuses: InvoiceStatus[] = ['Draft', 'Sent', 'Confirmed', 'Paid', 'Due', 'Overdue'];
 
 const flyerTrustPoints = [
   'Complete & modern equipment',
@@ -261,6 +300,11 @@ const servicesCollection = async () => {
   return db.collection<AppService>('services');
 };
 
+const invoicesCollection = async () => {
+  const db = await getMongoDb();
+  return db.collection<AppInvoice>('invoices');
+};
+
 const publicCustomer = (customer: AppCustomer) => ({
   ...customer,
   id: customer._id?.toString() || '',
@@ -271,6 +315,43 @@ const publicService = (service: AppService) => ({
   ...service,
   id: service._id?.toString() || '',
   _id: undefined,
+});
+
+const publicInvoice = (invoice: AppInvoice) => ({
+  ...invoice,
+  id: invoice._id?.toString() || '',
+  _id: undefined,
+});
+
+const formatMoney = (value: number) => (
+  new Intl.NumberFormat('en-CA', {
+    style: 'currency',
+    currency: 'CAD',
+    maximumFractionDigits: 2,
+  }).format(value)
+);
+
+const formatDate = (date: Date) => (
+  new Intl.DateTimeFormat('en-CA', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(date)
+);
+
+const getBaseUrl = () => process.env.FRONTEND_URL || 'http://localhost:3000';
+
+const createEmailLog = ({
+  type,
+  to,
+  subject,
+  body,
+}: Omit<EmailLog, 'sent_at'>): EmailLog => ({
+  type,
+  to,
+  subject,
+  body,
+  sent_at: new Date(),
 });
 
 const normalizeCustomerPayload = (body: Record<string, unknown>, partial = false) => {
@@ -382,6 +463,49 @@ const normalizeServicePayload = (body: Record<string, unknown>, partial = false)
   }
 
   return updates;
+};
+
+const normalizeInvoicePayload = (body: Record<string, unknown>) => {
+  const customerId = String(body.customerId || '').trim();
+  const serviceId = String(body.serviceId || '').trim();
+  const due = String(body.due || '').trim();
+  const amount = Number(body.amount);
+  const paid = Number(body.paid || 0);
+
+  if (!ObjectId.isValid(customerId)) {
+    throw new Error('A valid customer is required.');
+  }
+
+  if (!ObjectId.isValid(serviceId)) {
+    throw new Error('A valid service is required.');
+  }
+
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error('Price must be a valid number.');
+  }
+
+  if (!Number.isFinite(paid) || paid < 0 || paid > amount) {
+    throw new Error('Paid amount must be between 0 and the total amount.');
+  }
+
+  if (!due) {
+    throw new Error('Due date is required.');
+  }
+
+  const status = body.status ? String(body.status) as InvoiceStatus : 'Draft';
+  if (!allowedInvoiceStatuses.includes(status)) {
+    throw new Error('A valid invoice status is required.');
+  }
+
+  return { customerId, serviceId, due, amount, paid, status };
+};
+
+const nextInvoiceId = async () => {
+  const invoices = await invoicesCollection();
+  const count = await invoices.countDocuments();
+  const year = new Date().getFullYear();
+
+  return `INV-${year}-${String(count + 1).padStart(3, '0')}`;
 };
 
 const seedInitialServices = async () => {
@@ -874,6 +998,180 @@ app.delete('/api/services/:id', requireAuth, requireRole(['admin', 'manager']), 
   res.status(204).send();
 });
 
+app.get('/api/invoices', requireAuth, async (_req: AuthRequest, res: Response) => {
+  const invoices = await invoicesCollection();
+  const data = await invoices.find({}).sort({ created_at: -1 }).toArray();
+
+  res.json(data.map(publicInvoice));
+});
+
+app.post('/api/invoices', requireAuth, requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  try {
+    const payload = normalizeInvoicePayload(req.body);
+    const customers = await customersCollection();
+    const services = await servicesCollection();
+    const invoices = await invoicesCollection();
+    const customer = await customers.findOne({ _id: new ObjectId(payload.customerId) });
+    const service = await services.findOne({ _id: new ObjectId(payload.serviceId) });
+
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found.' });
+    }
+
+    if (!service) {
+      return res.status(404).json({ error: 'Service not found.' });
+    }
+
+    const now = new Date();
+    const invoiceId = await nextInvoiceId();
+    const receivable = Math.max(payload.amount - payload.paid, 0);
+    const agreementLink = `${getBaseUrl()}/agreements/${invoiceId}`;
+    const result = await invoices.insertOne({
+      invoice_id: invoiceId,
+      customerId: payload.customerId,
+      customer: customer.name,
+      email: customer.email,
+      business: service.business,
+      serviceId: payload.serviceId,
+      service: service.name,
+      issued: formatDate(now),
+      due: payload.due,
+      amount: payload.amount,
+      paid: payload.paid,
+      receivable,
+      status: payload.status,
+      agreementLink,
+      feedback: '',
+      emails: [],
+      created_at: now,
+      updated_at: now,
+    });
+    const invoice = await invoices.findOne({ _id: result.insertedId });
+
+    res.status(201).json(invoice ? publicInvoice(invoice) : null);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to create invoice.';
+    res.status(400).json({ error: message });
+  }
+});
+
+app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']), async (req: Request, res: Response) => {
+  const id = String(req.params.id);
+  const invoices = await invoicesCollection();
+  const invoice = await invoices.findOne({ $or: [{ invoice_id: id }, ...(ObjectId.isValid(id) ? [{ _id: new ObjectId(id) }] : [])] });
+
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found.' });
+  }
+
+  const email = createEmailLog({
+    type: 'invoice',
+    to: invoice.email,
+    subject: `${invoice.business} invoice ${invoice.invoice_id}`,
+    body: [
+      `Hello ${invoice.customer},`,
+      `Please review and confirm your ${invoice.service} invoice for ${formatMoney(invoice.amount)}.`,
+      `Agreement link: ${invoice.agreementLink}`,
+    ].join('\n\n'),
+  });
+
+  await invoices.updateOne(
+    { _id: invoice._id },
+    {
+      $set: { status: 'Sent', updated_at: new Date() },
+      $push: { emails: email },
+    },
+  );
+
+  const updatedInvoice = await invoices.findOne({ _id: invoice._id });
+  res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email });
+});
+
+app.get('/api/public/invoices/:invoiceId', async (req: Request, res: Response) => {
+  const invoices = await invoicesCollection();
+  const invoice = await invoices.findOne({ invoice_id: String(req.params.invoiceId) });
+
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found.' });
+  }
+
+  res.json(publicInvoice(invoice));
+});
+
+app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Response) => {
+  const invoices = await invoicesCollection();
+  const customers = await customersCollection();
+  const invoice = await invoices.findOne({ invoice_id: String(req.params.invoiceId) });
+
+  if (!invoice) {
+    return res.status(404).json({ error: 'Invoice not found.' });
+  }
+
+  const paidAmount = Number(req.body.paidAmount ?? invoice.amount);
+  const feedback = String(req.body.feedback || '').trim();
+
+  if (!Number.isFinite(paidAmount) || paidAmount < 0 || paidAmount > invoice.amount) {
+    return res.status(400).json({ error: 'Paid amount must be between 0 and the total amount.' });
+  }
+
+  const receivableAmount = Math.max(invoice.amount - paidAmount, 0);
+  const now = new Date();
+  const proofPayment = {
+    totalAmount: invoice.amount,
+    paidAmount,
+    receivableAmount,
+    generated_at: now,
+  };
+  const paymentSlipEmail = createEmailLog({
+    type: 'payment_slip',
+    to: invoice.email,
+    subject: `${invoice.business} payment slip ${invoice.invoice_id}`,
+    body: [
+      `Hello ${invoice.customer},`,
+      `Thank you for confirming ${invoice.service}.`,
+      `Total amount: ${formatMoney(invoice.amount)}`,
+      `Paid amount: ${formatMoney(paidAmount)}`,
+      `Receivable amount: ${formatMoney(receivableAmount)}`,
+      feedback ? `Customer feedback: ${feedback}` : '',
+    ].filter(Boolean).join('\n\n'),
+  });
+
+  await invoices.updateOne(
+    { _id: invoice._id },
+    {
+      $set: {
+        paid: paidAmount,
+        receivable: receivableAmount,
+        status: receivableAmount === 0 ? 'Paid' : 'Confirmed',
+        feedback,
+        confirmed_at: now,
+        proofPayment,
+        updated_at: now,
+      },
+      $push: { emails: paymentSlipEmail },
+    },
+  );
+
+  if (ObjectId.isValid(invoice.customerId)) {
+    await customers.updateOne(
+      { _id: new ObjectId(invoice.customerId) },
+      {
+        $set: {
+          business: invoice.business,
+          plan: invoice.service,
+          balance: receivableAmount,
+          status: receivableAmount > 0 ? 'Due' : 'Active',
+          lastService: `${formatDate(now)} - ${invoice.service}`,
+          updated_at: now,
+        },
+      },
+    );
+  }
+
+  const updatedInvoice = await invoices.findOne({ _id: invoice._id });
+  res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email: paymentSlipEmail });
+});
+
 const startServer = async () => {
   const server = app.listen(port, () => {
     console.log(`[server]: Server is running at http://localhost:${port}`);
@@ -885,6 +1183,9 @@ const startServer = async () => {
       await db.collection('users').createIndex({ email: 1 }, { unique: true });
       await db.collection('customers').createIndex({ email: 1 });
       await db.collection('services').createIndex({ business: 1, name: 1 });
+      await db.collection('invoices').createIndex({ invoice_id: 1 }, { unique: true });
+      await db.collection('invoices').createIndex({ customerId: 1 });
+      await db.collection('invoices').createIndex({ status: 1 });
       await seedInitialServices();
       console.log(`[mongo]: Connected to database ${db.databaseName}`);
     })
