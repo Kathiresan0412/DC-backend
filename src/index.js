@@ -330,6 +330,22 @@ const normalizeCustomerPayload = (body, partial = false) => {
     }
     return updates;
 };
+const normalizePublicEnquiryPayload = (body) => {
+    const name = String(body.name || '').trim();
+    const email = String(body.email || '').trim();
+    const phone = String(body.phone || '').trim();
+    const address = String(body.address || '').trim();
+    const business = String(body.business || '').trim();
+    const service = String(body.service || '').trim();
+    const message = String(body.message || '').trim();
+    if (!name || !email || !phone || !address || !business || !service) {
+        throw new Error('name, email, phone, address, business, and service are required.');
+    }
+    if (message.length > 1000) {
+        throw new Error('Message must be 1000 characters or less.');
+    }
+    return { name, email, phone, address, business, service, message };
+};
 const normalizeStringArray = (value) => {
     if (Array.isArray(value)) {
         return value.map((item) => String(item).trim()).filter(Boolean);
@@ -858,6 +874,59 @@ app.delete('/api/items/:id', requireAuth, requireRole(['admin', 'manager']), asy
         details: item ? { ...item, _id: item._id?.toString() } : {},
     });
     res.status(204).send();
+});
+app.post('/api/public/enquiries', async (req, res) => {
+    try {
+        const payload = normalizePublicEnquiryPayload(req.body || {});
+        const customers = await customersCollection();
+        const now = new Date();
+        const messageSummary = payload.message ? `Enquiry: ${payload.message}` : 'Enquiry submitted from customer landing page';
+        const result = await customers.insertOne({
+            name: payload.name,
+            email: payload.email,
+            phone: payload.phone,
+            address: payload.address,
+            business: payload.business,
+            plan: payload.service,
+            status: 'New lead',
+            balance: 0,
+            lastService: messageSummary.slice(0, 180),
+            created_at: now,
+            updated_at: now,
+        });
+        const customer = await customers.findOne({ _id: result.insertedId });
+        if (customer) {
+            await writeActivityLog({
+                actor: {
+                    id: 'customer',
+                    name: payload.name,
+                    email: payload.email,
+                    role: 'customer',
+                },
+                action: 'submitted_enquiry',
+                entityType: 'customer',
+                entityId: customer._id?.toString() || '',
+                entityLabel: customer.name,
+                summary: `${payload.name} submitted a ${payload.service} enquiry`,
+                business: customer.business,
+                customerId: customer._id?.toString() || '',
+                details: {
+                    customer: payload.name,
+                    email: payload.email,
+                    phone: payload.phone,
+                    address: payload.address,
+                    business: payload.business,
+                    service: payload.service,
+                    message: payload.message,
+                },
+            });
+        }
+        res.status(201).json(customer ? publicCustomer(customer) : null);
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to submit enquiry.';
+        res.status(400).json({ error: message });
+    }
 });
 app.get('/api/customers', requireAuth, async (_req, res) => {
     const customers = await customersCollection();
