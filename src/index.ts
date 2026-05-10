@@ -138,6 +138,16 @@ type AppPayment = {
   updated_at: Date;
 };
 
+type InvoicePaymentLine = {
+  label: string;
+  method: string;
+  amount: number;
+  paid_at: Date;
+  date: string;
+  notes?: string;
+  receivableAfterPayment: number;
+};
+
 type ActivityActor = {
   id: string;
   name: string;
@@ -445,7 +455,7 @@ const paymentProofHistoryForInvoice = async (invoice: AppInvoice): Promise<Proof
     };
   }).reverse();
 
-  return proofPayments.length ? proofPayments : (invoice.proofPayment ? [invoice.proofPayment] : []);
+  return proofPayments.length ? proofPayments : (invoice.proofPayment && invoice.proofPayment.paidAmount > 0 ? [invoice.proofPayment] : []);
 };
 
 const publicInvoiceWithPaymentHistory = async (invoice: AppInvoice) => (
@@ -547,7 +557,28 @@ const formatDate = (date: Date) => (
   }).format(date)
 );
 
-const getBaseUrl = () => process.env.FRONTEND_URL || 'http://localhost:3000';
+const getBaseUrl = () => (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+const getAgreementLink = (invoiceId: string) => `${getBaseUrl()}/agreements/${encodeURIComponent(invoiceId)}`;
+const getLogoUrl = () => `${getBaseUrl()}/primozen-logo.png`;
+
+const escapeHtml = (value: unknown) => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+
+const businessDetailsFor = (business: string) => {
+  const isFrozen = business === 'Frozen Solution';
+
+  return {
+    name: business,
+    email: isFrozen ? 'frozensolutions92@gmail.com' : 'freshcutservices92@gmail.com',
+    phone: isFrozen ? '+1 647-212-3424' : '+1 647-765-0949',
+    secondaryPhone: '+1 647-854-5652',
+    serviceArea: isFrozen ? 'Residential driveway & sidewalk' : 'Residential driveway & yard',
+  };
+};
 
 const createEmailLog = ({
   type,
@@ -580,6 +611,16 @@ const getSmtpTransport = () => {
   });
 };
 
+const parseEmailAddress = (value: string) => {
+  const match = value.match(/<([^>]+)>/);
+  return (match?.[1] || value).trim();
+};
+
+const parseEmailName = (value: string) => {
+  const match = value.match(/^([^<]+)</);
+  return match?.[1]?.trim().replace(/^"|"$/g, '');
+};
+
 const sendEmail = async (email: EmailLog, html: string) => {
   const from = process.env.SMTP_FROM || process.env.SMTP_USER;
 
@@ -587,37 +628,224 @@ const sendEmail = async (email: EmailLog, html: string) => {
     throw new Error('SMTP_FROM or SMTP_USER is required to send invoice email.');
   }
 
+  const fromAddress = parseEmailAddress(from);
+  const fromName = process.env.SMTP_FROM_NAME || parseEmailName(from) || 'Primozen';
   const transport = getSmtpTransport();
 
   await transport.sendMail({
-    from,
+    from: {
+      name: fromName,
+      address: fromAddress,
+    },
     to: email.to,
     subject: email.subject,
     text: email.body,
     html,
-    replyTo: process.env.SMTP_REPLY_TO || from,
+    replyTo: process.env.SMTP_REPLY_TO || fromAddress,
   });
 };
 
-const invoiceEmailHtml = (invoice: AppInvoice) => `
-  <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
-    <h2 style="margin:0 0 12px">${invoice.business} invoice ${invoice.invoice_id}</h2>
-    <p>Hello ${invoice.customer},</p>
-    <p>Please review and confirm your ${invoice.service} invoice.</p>
-    <table style="border-collapse:collapse;margin:16px 0">
-      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Total</td><td style="padding:4px 0;font-weight:700">${formatMoney(invoice.amount)}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Paid</td><td style="padding:4px 0">${formatMoney(invoice.paid)}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Receivable</td><td style="padding:4px 0">${formatMoney(invoice.receivable)}</td></tr>
-      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Due</td><td style="padding:4px 0">${invoice.due}</td></tr>
-    </table>
-    <p>
-      <a href="${invoice.agreementLink}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:6px">
-        Review and confirm invoice
-      </a>
-    </p>
-    <p style="color:#6b7280;font-size:13px">If the button does not work, open this link: ${invoice.agreementLink}</p>
-  </div>
-`;
+const invoicePaymentLines = async (invoice: AppInvoice): Promise<InvoicePaymentLine[]> => {
+  const payments = await paymentsCollection();
+  const invoicePayments = await payments
+    .find({ invoice_id: invoice.invoice_id })
+    .sort({ paid_at: 1, created_at: 1 })
+    .toArray();
+  const recordedPaymentTotal = invoicePayments.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+  const initialPaid = Math.max(Number(invoice.paid || 0) - recordedPaymentTotal, 0);
+  let runningPaid = 0;
+  const lines: InvoicePaymentLine[] = [];
+
+  if (initialPaid > 0) {
+    runningPaid = Math.min(initialPaid, invoice.amount);
+    lines.push({
+      label: 'Initial payment',
+      method: 'Initial payment',
+      amount: initialPaid,
+      paid_at: invoice.created_at,
+      date: invoice.issued,
+      receivableAfterPayment: Math.max(invoice.amount - runningPaid, 0),
+    });
+  }
+
+  invoicePayments.forEach((payment) => {
+    const amount = Number(payment.amount || 0);
+    runningPaid = Math.min(runningPaid + amount, invoice.amount);
+    lines.push({
+      label: payment.payment_id,
+      method: payment.method,
+      amount,
+      paid_at: payment.paid_at,
+      date: payment.date,
+      notes: payment.notes,
+      receivableAfterPayment: Math.max(invoice.amount - runningPaid, 0),
+    });
+  });
+
+  return lines;
+};
+
+const invoiceEmailText = (invoice: AppInvoice, paymentLines: InvoicePaymentLine[], agreementLink: string) => {
+  const paymentHistory = paymentLines.length
+    ? paymentLines.map((payment, index) => (
+      `${index + 1}. ${payment.label} - ${payment.date} - ${payment.method} - ${formatMoney(payment.amount)} - Balance after: ${formatMoney(payment.receivableAfterPayment)}`
+    )).join('\n')
+    : 'No previous payments recorded.';
+
+  return [
+    `Hello ${invoice.customer},`,
+    `Please review invoice ${invoice.invoice_id} for ${invoice.service}.`,
+    `Service: ${invoice.service}`,
+    `Company: ${invoice.business}`,
+    `Invoice status: ${invoice.status}`,
+    `Issued date: ${invoice.issued}`,
+    `Due date: ${invoice.due}`,
+    `Total amount: ${formatMoney(invoice.amount)}`,
+    `Total paid: ${formatMoney(invoice.paid)}`,
+    `Pending balance: ${formatMoney(invoice.receivable)}`,
+    `Payment history:\n${paymentHistory}`,
+    invoice.receivable > 0 ? `Please pay the pending balance of ${formatMoney(invoice.receivable)}.` : 'This invoice is fully paid.',
+    `View invoice and payment history: ${agreementLink}`,
+  ].join('\n\n');
+};
+
+const invoiceEmailHtml = (invoice: AppInvoice, service: AppService | null, paymentLines: InvoicePaymentLine[], agreementLink: string) => {
+  const company = businessDetailsFor(invoice.business);
+  const paymentRows = paymentLines.length
+    ? paymentLines.map((payment, index) => `
+      <tr>
+        <td style="border-top:1px solid #e5e7eb;padding:10px 8px;color:#111827">${index + 1}</td>
+        <td style="border-top:1px solid #e5e7eb;padding:10px 8px;color:#111827">${escapeHtml(payment.date)}</td>
+        <td style="border-top:1px solid #e5e7eb;padding:10px 8px;color:#111827">${escapeHtml(payment.label)}</td>
+        <td style="border-top:1px solid #e5e7eb;padding:10px 8px;color:#111827">${escapeHtml(payment.method)}</td>
+        <td style="border-top:1px solid #e5e7eb;padding:10px 8px;text-align:right;color:#111827">${formatMoney(payment.amount)}</td>
+        <td style="border-top:1px solid #e5e7eb;padding:10px 8px;text-align:right;color:#111827">${formatMoney(payment.receivableAfterPayment)}</td>
+      </tr>
+    `).join('')
+    : `
+      <tr>
+        <td colspan="6" style="border-top:1px solid #e5e7eb;padding:12px 8px;color:#6b7280">No previous payments recorded.</td>
+      </tr>
+    `;
+  const serviceIncludes = service?.includes?.length
+    ? `<p style="margin:8px 0 0;color:#374151"><strong>Includes:</strong> ${service.includes.map(escapeHtml).join(', ')}</p>`
+    : '';
+
+  return `
+    <div style="margin:0;background:#f3f4f6;padding:24px 0;font-family:Arial,sans-serif;color:#111827">
+      <div style="margin:0 auto;max-width:720px;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden">
+        <div style="padding:24px;border-bottom:1px solid #e5e7eb">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td>
+                <img src="${getLogoUrl()}" alt="Primozen" style="display:block;width:148px;max-width:148px;height:auto;margin-bottom:16px">
+                <h1 style="margin:0;font-size:24px;line-height:1.25;color:#111827">Invoice ${escapeHtml(invoice.invoice_id)}</h1>
+                <p style="margin:6px 0 0;color:#6b7280">${escapeHtml(invoice.business)} - ${escapeHtml(invoice.service)}</p>
+              </td>
+              <td align="right" style="vertical-align:top;color:#6b7280;font-size:13px">
+                <strong style="color:#111827">${escapeHtml(company.name)}</strong><br>
+                ${escapeHtml(company.email)}<br>
+                ${escapeHtml(company.phone)}<br>
+                ${escapeHtml(company.secondaryPhone)}
+              </td>
+            </tr>
+          </table>
+        </div>
+
+        <div style="padding:24px">
+          <p style="margin:0 0 16px;color:#374151">Hello ${escapeHtml(invoice.customer)}, please review this bill and the payment history saved for this invoice. The button below is only for viewing the invoice and previous payments.</p>
+
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;border-collapse:collapse">
+            <tr>
+              <td style="width:50%;padding:14px;background:#f9fafb;border:1px solid #e5e7eb">
+                <p style="margin:0;color:#6b7280;font-size:12px;text-transform:uppercase">Bill to</p>
+                <p style="margin:6px 0 0;font-weight:700">${escapeHtml(invoice.customer)}</p>
+                <p style="margin:3px 0 0;color:#374151">${escapeHtml(invoice.email)}</p>
+              </td>
+              <td style="width:50%;padding:14px;background:#f9fafb;border:1px solid #e5e7eb">
+                <p style="margin:0;color:#6b7280;font-size:12px;text-transform:uppercase">Invoice dates</p>
+                <p style="margin:6px 0 0;color:#374151">Issued: <strong>${escapeHtml(invoice.issued)}</strong></p>
+                <p style="margin:3px 0 0;color:#374151">Due: <strong>${escapeHtml(invoice.due)}</strong></p>
+                <p style="margin:3px 0 0;color:#374151">Status: <strong>${escapeHtml(invoice.status)}</strong></p>
+              </td>
+            </tr>
+          </table>
+
+          <h2 style="margin:0 0 10px;font-size:16px;color:#111827">Company Details</h2>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 20px;border-collapse:collapse">
+            <tr>
+              <td style="padding:14px;border:1px solid #e5e7eb;background:#ffffff">
+                <p style="margin:0;font-weight:700">${escapeHtml(company.name)}</p>
+                <p style="margin:6px 0 0;color:#374151">Email: ${escapeHtml(company.email)}</p>
+                <p style="margin:3px 0 0;color:#374151">Primary phone: ${escapeHtml(company.phone)}</p>
+                <p style="margin:3px 0 0;color:#374151">Secondary phone: ${escapeHtml(company.secondaryPhone)}</p>
+                <p style="margin:3px 0 0;color:#374151">Service area: ${escapeHtml(service?.serviceArea || company.serviceArea)}</p>
+              </td>
+            </tr>
+          </table>
+
+          <h2 style="margin:0 0 10px;font-size:16px;color:#111827">Service Details</h2>
+          <div style="border:1px solid #e5e7eb;border-radius:6px;padding:14px;margin-bottom:20px">
+            <p style="margin:0;font-weight:700">${escapeHtml(invoice.service)}</p>
+            <p style="margin:6px 0 0;color:#374151">${escapeHtml(service?.description || `${invoice.service} from ${invoice.business}`)}</p>
+            <p style="margin:8px 0 0;color:#374151"><strong>Service area:</strong> ${escapeHtml(service?.serviceArea || company.serviceArea)}</p>
+            <p style="margin:8px 0 0;color:#374151"><strong>Billing:</strong> ${escapeHtml(service?.billing || 'Invoice')}</p>
+            ${serviceIncludes}
+          </div>
+
+          <h2 style="margin:0 0 10px;font-size:16px;color:#111827">Payment Summary</h2>
+          <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:20px">
+            <tr>
+              <td style="padding:12px;border:1px solid #e5e7eb;background:#f9fafb;color:#6b7280">Total</td>
+              <td style="padding:12px;border:1px solid #e5e7eb;text-align:right;font-weight:700">${formatMoney(invoice.amount)}</td>
+            </tr>
+            <tr>
+              <td style="padding:12px;border:1px solid #e5e7eb;background:#f9fafb;color:#6b7280">Previous payments</td>
+              <td style="padding:12px;border:1px solid #e5e7eb;text-align:right;font-weight:700">${formatMoney(invoice.paid)}</td>
+            </tr>
+            <tr>
+              <td style="padding:12px;border:1px solid #e5e7eb;background:#fef3c7;color:#92400e">Pending balance</td>
+              <td style="padding:12px;border:1px solid #e5e7eb;text-align:right;font-size:18px;font-weight:800;color:#92400e">${formatMoney(invoice.receivable)}</td>
+            </tr>
+          </table>
+
+          <h2 style="margin:0 0 10px;font-size:16px;color:#111827">Invoice Notes</h2>
+          <div style="border:1px solid #e5e7eb;border-radius:6px;padding:14px;margin-bottom:20px;color:#374151">
+            <p style="margin:0">This email shows the invoice total, all saved payments for this invoice, and the remaining balance. Viewing the invoice does not record a new payment or change the paid amount.</p>
+          </div>
+
+          <h2 style="margin:0 0 10px;font-size:16px;color:#111827">Previous Payments</h2>
+          <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:20px;font-size:13px">
+            <thead>
+              <tr>
+                <th align="left" style="padding:8px;color:#6b7280">#</th>
+                <th align="left" style="padding:8px;color:#6b7280">Date</th>
+                <th align="left" style="padding:8px;color:#6b7280">Payment</th>
+                <th align="left" style="padding:8px;color:#6b7280">Method</th>
+                <th align="right" style="padding:8px;color:#6b7280">Paid</th>
+                <th align="right" style="padding:8px;color:#6b7280">Balance</th>
+              </tr>
+            </thead>
+            <tbody>${paymentRows}</tbody>
+          </table>
+
+          ${invoice.receivable > 0 ? `
+            <div style="margin:0 0 20px;padding:14px;border:1px solid #f59e0b;background:#fffbeb;border-radius:6px;color:#92400e">
+              Pending amount: <strong>${formatMoney(invoice.receivable)}</strong>. Please pay the remaining balance by ${escapeHtml(invoice.due)}.
+            </div>
+          ` : `
+            <div style="margin:0 0 20px;padding:14px;border:1px solid #10b981;background:#ecfdf5;border-radius:6px;color:#047857">
+              This invoice is fully paid. No pending balance remains.
+            </div>
+          `}
+
+          <p style="margin:0 0 18px;color:#374151">Open the invoice page to view the latest payment history and balance.</p>
+          <a href="${agreementLink}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:12px 18px;border-radius:6px;font-weight:700">View invoice and payment history</a>
+        </div>
+      </div>
+    </div>
+  `;
+};
 
 const normalizeCustomerPayload = (body: Record<string, unknown>, partial = false) => {
   const updates: Partial<AppCustomer> = {};
@@ -1674,7 +1902,7 @@ app.post('/api/invoices', requireAuth, requireRole(['admin', 'manager']), async 
     const now = new Date();
     const invoiceId = await nextInvoiceId();
     const receivable = Math.max(payload.amount - payload.paid, 0);
-    const agreementLink = `${getBaseUrl()}/agreements/${invoiceId}`;
+    const agreementLink = getAgreementLink(invoiceId);
     const result = await invoices.insertOne({
       invoice_id: invoiceId,
       customerId: payload.customerId,
@@ -1737,22 +1965,20 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
     return res.status(404).json({ error: 'Invoice not found.' });
   }
 
+  const services = await servicesCollection();
+  const service = ObjectId.isValid(invoice.serviceId) ? await services.findOne({ _id: new ObjectId(invoice.serviceId) }) : null;
+  const agreementLink = getAgreementLink(invoice.invoice_id);
+  const invoiceForEmail = { ...invoice, agreementLink };
+  const paymentLines = await invoicePaymentLines(invoice);
   const email = createEmailLog({
     type: 'invoice',
     to: invoice.email,
     subject: `${invoice.business} invoice ${invoice.invoice_id}`,
-    body: [
-      `Hello ${invoice.customer},`,
-      `Please review and confirm your ${invoice.service} invoice.`,
-      `Total amount: ${formatMoney(invoice.amount)}`,
-      `Paid amount: ${formatMoney(invoice.paid)}`,
-      `Receivable amount: ${formatMoney(invoice.receivable)}`,
-      `Agreement link: ${invoice.agreementLink}`,
-    ].join('\n\n'),
+    body: invoiceEmailText(invoiceForEmail, paymentLines, agreementLink),
   });
 
   try {
-    await sendEmail(email, invoiceEmailHtml(invoice));
+    await sendEmail(email, invoiceEmailHtml(invoiceForEmail, service, paymentLines, agreementLink));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to send invoice email.';
     return res.status(500).json({ error: message });
@@ -1761,7 +1987,11 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
   await invoices.updateOne(
     { _id: invoice._id },
     {
-      $set: { status: invoice.status === 'Draft' ? 'Sent' : invoice.status, updated_at: new Date() },
+      $set: {
+        agreementLink,
+        status: invoice.status === 'Draft' ? 'Sent' : invoice.status,
+        updated_at: new Date(),
+      },
       $push: { emails: email },
     },
   );
@@ -1785,7 +2015,7 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
       subject: email.subject,
       previousStatus: invoice.status,
       nextStatus: invoice.status === 'Draft' ? 'Sent' : invoice.status,
-      agreementLink: invoice.agreementLink,
+      agreementLink,
     },
   });
   res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email });
@@ -1921,155 +2151,16 @@ app.get('/api/public/invoices/:invoiceId', async (req: Request, res: Response) =
 
 app.post('/api/public/invoices/:invoiceId/confirm', async (req: Request, res: Response) => {
   const invoices = await invoicesCollection();
-  const customers = await customersCollection();
-  const payments = await paymentsCollection();
   const invoice = await invoices.findOne({ invoice_id: String(req.params.invoiceId) });
 
   if (!invoice) {
     return res.status(404).json({ error: 'Invoice not found.' });
   }
 
-  const currentPaid = Number(invoice.paid || 0);
-  const currentReceivable = Math.max(invoice.amount - currentPaid, 0);
-  const paidAmount = currentReceivable;
-  const feedback = String(req.body.feedback || '').trim();
-
-  const totalPaid = Math.min(currentPaid + paidAmount, invoice.amount);
-  const receivableAmount = Math.max(invoice.amount - totalPaid, 0);
-  const now = new Date();
-  const proofPayment = {
-    totalAmount: invoice.amount,
-    paidAmount,
-    receivableAmount,
-    generated_at: now,
-  };
-  const paymentSlipEmail = createEmailLog({
-    type: 'payment_slip',
-    to: invoice.email,
-    subject: `${invoice.business} payment slip ${invoice.invoice_id}`,
-    body: [
-      `Hello ${invoice.customer},`,
-      `Thank you for confirming ${invoice.service}.`,
-      `Total amount: ${formatMoney(invoice.amount)}`,
-      `Paid amount: ${formatMoney(paidAmount)}`,
-      `Receivable amount: ${formatMoney(receivableAmount)}`,
-      feedback ? `Customer feedback: ${feedback}` : '',
-    ].filter(Boolean).join('\n\n'),
+  return res.status(405).json({
+    error: 'Invoice confirmation is disabled. This invoice link is view only.',
+    invoice: await publicInvoiceWithPaymentHistory(invoice),
   });
-
-  await invoices.updateOne(
-    { _id: invoice._id },
-    {
-      $set: {
-        paid: totalPaid,
-        receivable: receivableAmount,
-        status: receivableAmount === 0 ? 'Paid' : 'Confirmed',
-        feedback,
-        confirmed_at: now,
-        proofPayment,
-        updated_at: now,
-      },
-      $push: { emails: paymentSlipEmail },
-    },
-  );
-
-  if (paidAmount > 0) {
-    const result = await payments.insertOne({
-      payment_id: await nextPaymentId(),
-      invoiceId: invoice._id?.toString() || '',
-      invoice_id: invoice.invoice_id,
-      customerId: invoice.customerId,
-      customer: invoice.customer,
-      email: invoice.email,
-      business: invoice.business,
-      service: invoice.service,
-      method: 'Customer confirmation',
-      amount: paidAmount,
-      paid_at: now,
-      date: formatDate(now),
-      notes: feedback,
-      created_at: now,
-      updated_at: now,
-    });
-    const payment = await payments.findOne({ _id: result.insertedId });
-
-    if (payment) {
-      await writeActivityLog({
-        actor: {
-          id: invoice.customerId || invoice.email,
-          name: invoice.customer,
-          email: invoice.email,
-          role: 'customer',
-        },
-        action: 'customer_confirmed_payment',
-        entityType: 'payment',
-        entityId: payment._id?.toString() || '',
-        entityLabel: payment.payment_id,
-        summary: `${invoice.customer} confirmed ${formatMoney(paidAmount)} payment for ${invoice.invoice_id}`,
-        business: invoice.business,
-        customerId: invoice.customerId,
-        invoiceId: invoice.invoice_id,
-        paymentId: payment.payment_id,
-        serviceId: invoice.serviceId,
-        details: {
-          payment: payment.payment_id,
-          invoice: invoice.invoice_id,
-          customer: invoice.customer,
-          service: invoice.service,
-          paidAmount,
-          previousPaid: currentPaid,
-          newPaid: totalPaid,
-          receivableAmount,
-          feedback,
-        },
-      });
-    }
-  } else {
-    await writeActivityLog({
-      actor: {
-        id: invoice.customerId || invoice.email,
-        name: invoice.customer,
-        email: invoice.email,
-        role: 'customer',
-      },
-      action: 'customer_confirmed_invoice',
-      entityType: 'invoice',
-      entityId: invoice._id?.toString() || invoice.invoice_id,
-      entityLabel: invoice.invoice_id,
-      summary: `${invoice.customer} confirmed invoice ${invoice.invoice_id}`,
-      business: invoice.business,
-      customerId: invoice.customerId,
-      invoiceId: invoice.invoice_id,
-      serviceId: invoice.serviceId,
-      details: {
-        invoice: invoice.invoice_id,
-        customer: invoice.customer,
-        service: invoice.service,
-        paidAmount,
-        receivableAmount,
-        feedback,
-      },
-    });
-  }
-
-  if (ObjectId.isValid(invoice.customerId)) {
-    await customers.updateOne(
-      { _id: new ObjectId(invoice.customerId) },
-      {
-        $set: {
-          business: invoice.business,
-          plan: invoice.service,
-          balance: receivableAmount,
-          status: receivableAmount > 0 ? 'Due' : 'Active',
-          lastService: `${formatDate(now)} - ${invoice.service}`,
-          updated_at: now,
-        },
-      },
-    );
-  }
-
-  const updatedInvoice = await invoices.findOne({ _id: invoice._id });
-  res.json({ invoice: updatedInvoice ? await publicInvoiceWithPaymentHistory(updatedInvoice) : null, email: paymentSlipEmail });
 });
 
 const startServer = async () => {
