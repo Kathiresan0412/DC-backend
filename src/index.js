@@ -209,6 +209,10 @@ const paymentsCollection = async () => {
     const db = await getMongoDb();
     return db.collection('payments');
 };
+const activityLogsCollection = async () => {
+    const db = await getMongoDb();
+    return db.collection('activity_logs');
+};
 const publicCustomer = (customer) => ({
     ...customer,
     id: customer._id?.toString() || '',
@@ -229,6 +233,48 @@ const publicPayment = (payment) => ({
     id: payment._id?.toString() || '',
     _id: undefined,
 });
+const publicActivityLog = (log) => ({
+    ...log,
+    id: log._id?.toString() || '',
+    _id: undefined,
+});
+const actorFromUser = (user) => ({
+    id: user?._id?.toString() || 'system',
+    name: user?.full_name || 'System',
+    email: user?.email || '',
+    role: user?.role || 'system',
+});
+const writeActivityLog = async ({ req, actor, action, entityType, entityId, entityLabel, summary, details = {}, business, customerId, invoiceId, paymentId, serviceId, targetUserId, }) => {
+    try {
+        const logs = await activityLogsCollection();
+        const log = {
+            action,
+            entityType,
+            entityId,
+            entityLabel,
+            summary,
+            details,
+            actor: actor || actorFromUser(req?.user),
+            created_at: new Date(),
+        };
+        if (business)
+            log.business = business;
+        if (customerId)
+            log.customerId = customerId;
+        if (invoiceId)
+            log.invoiceId = invoiceId;
+        if (paymentId)
+            log.paymentId = paymentId;
+        if (serviceId)
+            log.serviceId = serviceId;
+        if (targetUserId)
+            log.targetUserId = targetUserId;
+        await logs.insertOne(log);
+    }
+    catch (error) {
+        console.error('[activity-log]: Failed to write activity log', error);
+    }
+};
 const formatMoney = (value) => (new Intl.NumberFormat('en-CA', {
     style: 'currency',
     currency: 'CAD',
@@ -511,6 +557,16 @@ app.post('/api/auth/login', async (req, res) => {
         return res.status(403).json({ error: 'User account is inactive.' });
     }
     const token = signToken({ sub: user._id.toString(), email: user.email, role: user.role });
+    await writeActivityLog({
+        actor: actorFromUser(user),
+        action: 'signed_in',
+        entityType: 'auth',
+        entityId: user._id.toString(),
+        entityLabel: user.full_name,
+        summary: `${user.full_name} signed in`,
+        targetUserId: user._id.toString(),
+        details: { email: user.email, role: user.role },
+    });
     res.json({ token, user: publicUser(user) });
 });
 app.post('/api/auth/change-password', requireAuth, async (req, res) => {
@@ -555,6 +611,18 @@ app.put('/api/profile', requireAuth, async (req, res) => {
         },
     });
     const user = await users.findOne({ _id: req.user._id });
+    await writeActivityLog({
+        req,
+        action: 'updated_profile',
+        entityType: 'profile',
+        entityId: req.user._id.toString(),
+        entityLabel: user?.full_name || req.user.full_name,
+        summary: `${user?.full_name || req.user.full_name} updated their profile`,
+        targetUserId: req.user._id.toString(),
+        details: {
+            changed: ['full_name', 'phone', 'bio', 'avatar_url'].filter((field) => req.body[field] !== undefined),
+        },
+    });
     res.json(user ? publicUser(user) : publicUser(req.user));
 });
 app.get('/api/users', requireAuth, requireRole(['admin']), async (_req, res) => {
@@ -594,6 +662,16 @@ app.post('/api/users', requireAuth, requireRole(['admin']), async (req, res) => 
     if (!user) {
         return res.status(500).json({ error: 'Failed to create user.' });
     }
+    await writeActivityLog({
+        req,
+        action: 'created_user',
+        entityType: 'user',
+        entityId: user._id?.toString() || '',
+        entityLabel: user.full_name,
+        summary: `${req.user?.full_name || 'Admin'} created user ${user.full_name}`,
+        targetUserId: user._id?.toString() || '',
+        details: { email: user.email, role: user.role, status: user.status },
+    });
     res.status(201).json(publicUser(user));
 });
 app.patch('/api/users/:id', requireAuth, requireRole(['admin']), async (req, res) => {
@@ -624,6 +702,16 @@ app.patch('/api/users/:id', requireAuth, requireRole(['admin']), async (req, res
     if (!user) {
         return res.status(404).json({ error: 'User not found.' });
     }
+    await writeActivityLog({
+        req,
+        action: 'updated_user',
+        entityType: 'user',
+        entityId: user._id?.toString() || id,
+        entityLabel: user.full_name,
+        summary: `${req.user?.full_name || 'Admin'} updated user ${user.full_name}`,
+        targetUserId: user._id?.toString() || id,
+        details: { full_name: user.full_name, role: user.role, status: user.status },
+    });
     res.json(publicUser(user));
 });
 app.delete('/api/users/:id', requireAuth, requireRole(['admin']), async (req, res) => {
@@ -643,7 +731,65 @@ app.delete('/api/users/:id', requireAuth, requireRole(['admin']), async (req, re
         return res.status(400).json({ error: 'Only inactive users can be deleted.' });
     }
     await users.deleteOne({ _id: user._id });
+    await writeActivityLog({
+        req,
+        action: 'deleted_user',
+        entityType: 'user',
+        entityId: user._id?.toString() || id,
+        entityLabel: user.full_name,
+        summary: `${req.user?.full_name || 'Admin'} deleted user ${user.full_name}`,
+        targetUserId: user._id?.toString() || id,
+        details: { email: user.email, role: user.role },
+    });
     res.status(204).send();
+});
+app.get('/api/activity-logs', requireAuth, async (req, res) => {
+    const logs = await activityLogsCollection();
+    const limit = Math.min(Math.max(Number(req.query.limit || 50), 1), 200);
+    const filter = {};
+    const query = String(req.query.query || '').trim();
+    const action = String(req.query.action || '').trim();
+    const entityType = String(req.query.entityType || '').trim();
+    const business = String(req.query.business || '').trim();
+    const actorId = String(req.query.actorId || '').trim();
+    const customerId = String(req.query.customerId || '').trim();
+    const from = String(req.query.from || '').trim();
+    const to = String(req.query.to || '').trim();
+    if (action)
+        filter.action = action;
+    if (entityType)
+        filter.entityType = entityType;
+    if (business)
+        filter.business = business;
+    if (actorId)
+        filter['actor.id'] = actorId;
+    if (customerId)
+        filter.customerId = customerId;
+    if (from || to) {
+        const createdAt = {};
+        if (from)
+            createdAt.$gte = new Date(`${from}T00:00:00`);
+        if (to)
+            createdAt.$lte = new Date(`${to}T23:59:59.999`);
+        filter.created_at = createdAt;
+    }
+    if (query) {
+        const search = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+        filter.$or = [
+            { summary: search },
+            { entityLabel: search },
+            { action: search },
+            { entityType: search },
+            { business: search },
+            { 'actor.name': search },
+            { 'actor.email': search },
+            { 'details.customer': search },
+            { 'details.invoice': search },
+            { 'details.service': search },
+        ];
+    }
+    const data = await logs.find(filter).sort({ created_at: -1 }).limit(limit).toArray();
+    res.json(data.map(publicActivityLog));
 });
 app.get('/api/items', requireAuth, async (_req, res) => {
     const items = await itemsCollection();
@@ -663,6 +809,15 @@ app.post('/api/items', requireAuth, requireRole(['admin', 'manager']), async (re
         updated_at: now,
     });
     const item = await items.findOne({ _id: result.insertedId });
+    await writeActivityLog({
+        req,
+        action: 'created_item',
+        entityType: 'item',
+        entityId: result.insertedId.toString(),
+        entityLabel: String(item?.name || item?.title || item?.sku || 'Inventory item'),
+        summary: `${req.user?.full_name || 'User'} created inventory item ${String(item?.name || item?.title || item?.sku || result.insertedId.toString())}`,
+        details: item ? { ...item, _id: item._id?.toString() } : req.body,
+    });
     res.status(201).json(item ? { ...item, id: item._id.toString(), _id: undefined } : null);
 });
 app.put('/api/items/:id', requireAuth, requireRole(['admin', 'manager', 'employee']), async (req, res) => {
@@ -677,12 +832,31 @@ app.put('/api/items/:id', requireAuth, requireRole(['admin', 'manager', 'employe
     if (!item) {
         return res.status(404).json({ error: 'Item not found.' });
     }
+    await writeActivityLog({
+        req,
+        action: 'updated_item',
+        entityType: 'item',
+        entityId: item._id.toString(),
+        entityLabel: String(item.name || item.title || item.sku || 'Inventory item'),
+        summary: `${req.user?.full_name || 'User'} updated inventory item ${String(item.name || item.title || item.sku || item._id.toString())}`,
+        details: { updates },
+    });
     res.json({ ...item, id: item._id.toString(), _id: undefined });
 });
 app.delete('/api/items/:id', requireAuth, requireRole(['admin', 'manager']), async (req, res) => {
     const id = String(req.params.id);
     const items = await itemsCollection();
+    const item = ObjectId.isValid(id) ? await items.findOne({ _id: new ObjectId(id) }) : null;
     await items.deleteOne({ _id: new ObjectId(id) });
+    await writeActivityLog({
+        req,
+        action: 'deleted_item',
+        entityType: 'item',
+        entityId: id,
+        entityLabel: String(item?.name || item?.title || item?.sku || 'Inventory item'),
+        summary: `${req.user?.full_name || 'User'} deleted inventory item ${String(item?.name || item?.title || item?.sku || id)}`,
+        details: item ? { ...item, _id: item._id?.toString() } : {},
+    });
     res.status(204).send();
 });
 app.get('/api/customers', requireAuth, async (_req, res) => {
@@ -709,6 +883,27 @@ app.post('/api/customers', requireAuth, requireRole(['admin', 'manager']), async
             updated_at: now,
         });
         const customer = await customers.findOne({ _id: result.insertedId });
+        if (customer) {
+            await writeActivityLog({
+                req,
+                action: 'created_customer',
+                entityType: 'customer',
+                entityId: customer._id?.toString() || '',
+                entityLabel: customer.name,
+                summary: `${req.user?.full_name || 'User'} created customer ${customer.name}`,
+                business: customer.business,
+                customerId: customer._id?.toString() || '',
+                details: {
+                    customer: customer.name,
+                    email: customer.email,
+                    phone: customer.phone,
+                    address: customer.address,
+                    business: customer.business,
+                    status: customer.status,
+                    balance: customer.balance,
+                },
+            });
+        }
         res.status(201).json(customer ? publicCustomer(customer) : null);
     }
     catch (error) {
@@ -729,6 +924,17 @@ app.put('/api/customers/:id', requireAuth, requireRole(['admin', 'manager']), as
         if (!customer) {
             return res.status(404).json({ error: 'Customer not found.' });
         }
+        await writeActivityLog({
+            req,
+            action: 'updated_customer',
+            entityType: 'customer',
+            entityId: customer._id?.toString() || id,
+            entityLabel: customer.name,
+            summary: `${req.user?.full_name || 'User'} updated customer ${customer.name}`,
+            business: customer.business,
+            customerId: customer._id?.toString() || id,
+            details: { customer: customer.name, updates, status: customer.status, balance: customer.balance },
+        });
         res.json(publicCustomer(customer));
     }
     catch (error) {
@@ -742,10 +948,22 @@ app.delete('/api/customers/:id', requireAuth, requireRole(['admin', 'manager']),
         return res.status(400).json({ error: 'Invalid customer id.' });
     }
     const customers = await customersCollection();
+    const customer = await customers.findOne({ _id: new ObjectId(id) });
     const result = await customers.deleteOne({ _id: new ObjectId(id) });
     if (result.deletedCount === 0) {
         return res.status(404).json({ error: 'Customer not found.' });
     }
+    await writeActivityLog({
+        req,
+        action: 'deleted_customer',
+        entityType: 'customer',
+        entityId: id,
+        entityLabel: customer?.name || 'Customer',
+        summary: `${req.user?.full_name || 'User'} deleted customer ${customer?.name || id}`,
+        business: customer?.business,
+        customerId: id,
+        details: customer ? { customer: customer.name, email: customer.email, phone: customer.phone, balance: customer.balance } : {},
+    });
     res.status(204).send();
 });
 app.get('/api/services', requireAuth, async (_req, res) => {
@@ -777,6 +995,26 @@ app.post('/api/services', requireAuth, requireRole(['admin', 'manager']), async 
             updated_at: now,
         });
         const service = await services.findOne({ _id: result.insertedId });
+        if (service) {
+            await writeActivityLog({
+                req,
+                action: 'created_service',
+                entityType: 'service',
+                entityId: service._id?.toString() || '',
+                entityLabel: service.name,
+                summary: `${req.user?.full_name || 'User'} created service ${service.name}`,
+                business: service.business,
+                serviceId: service._id?.toString() || '',
+                details: {
+                    service: service.name,
+                    business: service.business,
+                    category: service.category,
+                    price: service.price,
+                    billing: service.billing,
+                    status: service.status,
+                },
+            });
+        }
         res.status(201).json(service ? publicService(service) : null);
     }
     catch (error) {
@@ -797,6 +1035,17 @@ app.put('/api/services/:id', requireAuth, requireRole(['admin', 'manager']), asy
         if (!service) {
             return res.status(404).json({ error: 'Service not found.' });
         }
+        await writeActivityLog({
+            req,
+            action: 'updated_service',
+            entityType: 'service',
+            entityId: service._id?.toString() || id,
+            entityLabel: service.name,
+            summary: `${req.user?.full_name || 'User'} updated service ${service.name}`,
+            business: service.business,
+            serviceId: service._id?.toString() || id,
+            details: { service: service.name, updates, price: service.price, status: service.status },
+        });
         res.json(publicService(service));
     }
     catch (error) {
@@ -810,10 +1059,22 @@ app.delete('/api/services/:id', requireAuth, requireRole(['admin', 'manager']), 
         return res.status(400).json({ error: 'Invalid service id.' });
     }
     const services = await servicesCollection();
+    const service = await services.findOne({ _id: new ObjectId(id) });
     const result = await services.deleteOne({ _id: new ObjectId(id) });
     if (result.deletedCount === 0) {
         return res.status(404).json({ error: 'Service not found.' });
     }
+    await writeActivityLog({
+        req,
+        action: 'deleted_service',
+        entityType: 'service',
+        entityId: id,
+        entityLabel: service?.name || 'Service',
+        summary: `${req.user?.full_name || 'User'} deleted service ${service?.name || id}`,
+        business: service?.business,
+        serviceId: id,
+        details: service ? { service: service.name, business: service.business, category: service.category, price: service.price } : {},
+    });
     res.status(204).send();
 });
 app.get('/api/invoices', requireAuth, async (_req, res) => {
@@ -860,6 +1121,30 @@ app.post('/api/invoices', requireAuth, requireRole(['admin', 'manager']), async 
             updated_at: now,
         });
         const invoice = await invoices.findOne({ _id: result.insertedId });
+        if (invoice) {
+            await writeActivityLog({
+                req,
+                action: 'created_invoice',
+                entityType: 'invoice',
+                entityId: invoice._id?.toString() || '',
+                entityLabel: invoice.invoice_id,
+                summary: `${req.user?.full_name || 'User'} created invoice ${invoice.invoice_id} for ${invoice.customer}`,
+                business: invoice.business,
+                customerId: invoice.customerId,
+                invoiceId: invoice.invoice_id,
+                serviceId: invoice.serviceId,
+                details: {
+                    invoice: invoice.invoice_id,
+                    customer: invoice.customer,
+                    service: invoice.service,
+                    amount: invoice.amount,
+                    paid: invoice.paid,
+                    receivable: invoice.receivable,
+                    status: invoice.status,
+                    due: invoice.due,
+                },
+            });
+        }
         res.status(201).json(invoice ? publicInvoice(invoice) : null);
     }
     catch (error) {
@@ -889,6 +1174,27 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
         $push: { emails: email },
     });
     const updatedInvoice = await invoices.findOne({ _id: invoice._id });
+    await writeActivityLog({
+        req,
+        action: 'sent_invoice',
+        entityType: 'invoice',
+        entityId: invoice._id?.toString() || invoice.invoice_id,
+        entityLabel: invoice.invoice_id,
+        summary: `${req.user?.full_name || 'User'} sent invoice ${invoice.invoice_id} to ${invoice.customer}`,
+        business: invoice.business,
+        customerId: invoice.customerId,
+        invoiceId: invoice.invoice_id,
+        serviceId: invoice.serviceId,
+        details: {
+            invoice: invoice.invoice_id,
+            customer: invoice.customer,
+            to: invoice.email,
+            subject: email.subject,
+            previousStatus: invoice.status,
+            nextStatus: 'Sent',
+            agreementLink: invoice.agreementLink,
+        },
+    });
     res.json({ invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null, email });
 });
 app.get('/api/payments', requireAuth, async (_req, res) => {
@@ -955,6 +1261,34 @@ app.post('/api/payments', requireAuth, requireRole(['admin', 'manager']), async 
         }
         const payment = await payments.findOne({ _id: result.insertedId });
         const updatedInvoice = await invoices.findOne({ _id: invoice._id });
+        if (payment) {
+            await writeActivityLog({
+                req,
+                action: 'recorded_payment',
+                entityType: 'payment',
+                entityId: payment._id?.toString() || '',
+                entityLabel: payment.payment_id,
+                summary: `${req.user?.full_name || 'User'} recorded ${formatMoney(payment.amount)} payment for ${invoice.invoice_id}`,
+                business: payment.business,
+                customerId: payment.customerId,
+                invoiceId: payment.invoice_id,
+                paymentId: payment.payment_id,
+                details: {
+                    payment: payment.payment_id,
+                    invoice: payment.invoice_id,
+                    customer: payment.customer,
+                    service: payment.service,
+                    method: payment.method,
+                    amount: payment.amount,
+                    previousPaid: invoice.paid,
+                    newPaid: paid,
+                    previousReceivable: invoice.receivable,
+                    newReceivable: receivable,
+                    status: receivable === 0 ? 'Paid' : 'Confirmed',
+                    notes: payment.notes,
+                },
+            });
+        }
         res.status(201).json({
             payment: payment ? publicPayment(payment) : null,
             invoice: updatedInvoice ? publicInvoice(updatedInvoice) : null,
@@ -1023,7 +1357,7 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
         $push: { emails: paymentSlipEmail },
     });
     if (paidAmount > 0) {
-        await payments.insertOne({
+        const result = await payments.insertOne({
             payment_id: await nextPaymentId(),
             invoiceId: invoice._id?.toString() || '',
             invoice_id: invoice.invoice_id,
@@ -1039,6 +1373,65 @@ app.post('/api/public/invoices/:invoiceId/confirm', async (req, res) => {
             notes: feedback,
             created_at: now,
             updated_at: now,
+        });
+        const payment = await payments.findOne({ _id: result.insertedId });
+        if (payment) {
+            await writeActivityLog({
+                actor: {
+                    id: invoice.customerId || invoice.email,
+                    name: invoice.customer,
+                    email: invoice.email,
+                    role: 'customer',
+                },
+                action: 'customer_confirmed_payment',
+                entityType: 'payment',
+                entityId: payment._id?.toString() || '',
+                entityLabel: payment.payment_id,
+                summary: `${invoice.customer} confirmed ${formatMoney(paidAmount)} payment for ${invoice.invoice_id}`,
+                business: invoice.business,
+                customerId: invoice.customerId,
+                invoiceId: invoice.invoice_id,
+                paymentId: payment.payment_id,
+                serviceId: invoice.serviceId,
+                details: {
+                    payment: payment.payment_id,
+                    invoice: invoice.invoice_id,
+                    customer: invoice.customer,
+                    service: invoice.service,
+                    paidAmount,
+                    previousPaid: currentPaid,
+                    newPaid: totalPaid,
+                    receivableAmount,
+                    feedback,
+                },
+            });
+        }
+    }
+    else {
+        await writeActivityLog({
+            actor: {
+                id: invoice.customerId || invoice.email,
+                name: invoice.customer,
+                email: invoice.email,
+                role: 'customer',
+            },
+            action: 'customer_confirmed_invoice',
+            entityType: 'invoice',
+            entityId: invoice._id?.toString() || invoice.invoice_id,
+            entityLabel: invoice.invoice_id,
+            summary: `${invoice.customer} confirmed invoice ${invoice.invoice_id}`,
+            business: invoice.business,
+            customerId: invoice.customerId,
+            invoiceId: invoice.invoice_id,
+            serviceId: invoice.serviceId,
+            details: {
+                invoice: invoice.invoice_id,
+                customer: invoice.customer,
+                service: invoice.service,
+                paidAmount,
+                receivableAmount,
+                feedback,
+            },
         });
     }
     if (ObjectId.isValid(invoice.customerId)) {
@@ -1069,6 +1462,11 @@ const startServer = async () => {
         await db.collection('invoices').createIndex({ invoice_id: 1 }, { unique: true });
         await db.collection('invoices').createIndex({ customerId: 1 });
         await db.collection('invoices').createIndex({ status: 1 });
+        await db.collection('activity_logs').createIndex({ created_at: -1 });
+        await db.collection('activity_logs').createIndex({ action: 1, entityType: 1 });
+        await db.collection('activity_logs').createIndex({ business: 1 });
+        await db.collection('activity_logs').createIndex({ customerId: 1 });
+        await db.collection('activity_logs').createIndex({ 'actor.id': 1 });
         await seedInitialServices();
         console.log(`[mongo]: Connected to database ${db.databaseName}`);
     })
