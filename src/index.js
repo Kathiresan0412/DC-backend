@@ -244,8 +244,12 @@ const actorFromUser = (user) => ({
     email: user?.email || '',
     role: user?.role || 'system',
 });
+const hiddenActivityActions = ['signed_in', 'signed_out'];
 const writeActivityLog = async ({ req, actor, action, entityType, entityId, entityLabel, summary, details = {}, business, customerId, invoiceId, paymentId, serviceId, targetUserId, }) => {
     try {
+        if (entityType === 'auth' || hiddenActivityActions.includes(action)) {
+            return;
+        }
         const logs = await activityLogsCollection();
         const log = {
             action,
@@ -573,16 +577,6 @@ app.post('/api/auth/login', async (req, res) => {
         return res.status(403).json({ error: 'User account is inactive.' });
     }
     const token = signToken({ sub: user._id.toString(), email: user.email, role: user.role });
-    await writeActivityLog({
-        actor: actorFromUser(user),
-        action: 'signed_in',
-        entityType: 'auth',
-        entityId: user._id.toString(),
-        entityLabel: user.full_name,
-        summary: `${user.full_name} signed in`,
-        targetUserId: user._id.toString(),
-        details: { email: user.email, role: user.role },
-    });
     res.json({ token, user: publicUser(user) });
 });
 app.post('/api/auth/change-password', requireAuth, async (req, res) => {
@@ -771,10 +765,21 @@ app.get('/api/activity-logs', requireAuth, async (req, res) => {
     const customerId = String(req.query.customerId || '').trim();
     const from = String(req.query.from || '').trim();
     const to = String(req.query.to || '').trim();
-    if (action)
+    if (hiddenActivityActions.includes(action) || entityType === 'auth') {
+        return res.json([]);
+    }
+    if (action) {
         filter.action = action;
-    if (entityType)
+    }
+    else {
+        filter.action = { $nin: hiddenActivityActions };
+    }
+    if (entityType) {
         filter.entityType = entityType;
+    }
+    else {
+        filter.entityType = { $ne: 'auth' };
+    }
     if (business)
         filter.business = business;
     if (actorId)

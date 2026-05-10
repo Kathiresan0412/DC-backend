@@ -407,6 +407,8 @@ const actorFromUser = (user?: AppUser): ActivityActor => ({
   role: user?.role || 'system',
 });
 
+const hiddenActivityActions = ['signed_in', 'signed_out'];
+
 const writeActivityLog = async ({
   req,
   actor,
@@ -439,6 +441,10 @@ const writeActivityLog = async ({
   targetUserId?: string | undefined;
 }) => {
   try {
+    if (entityType === 'auth' || hiddenActivityActions.includes(action)) {
+      return;
+    }
+
     const logs = await activityLogsCollection();
     const log: AppActivityLog = {
       action,
@@ -850,16 +856,6 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   }
 
   const token = signToken({ sub: user._id.toString(), email: user.email, role: user.role });
-  await writeActivityLog({
-    actor: actorFromUser(user),
-    action: 'signed_in',
-    entityType: 'auth',
-    entityId: user._id.toString(),
-    entityLabel: user.full_name,
-    summary: `${user.full_name} signed in`,
-    targetUserId: user._id.toString(),
-    details: { email: user.email, role: user.role },
-  });
   res.json({ token, user: publicUser(user) });
 });
 
@@ -1091,8 +1087,22 @@ app.get('/api/activity-logs', requireAuth, async (req: AuthRequest, res: Respons
   const from = String(req.query.from || '').trim();
   const to = String(req.query.to || '').trim();
 
-  if (action) filter.action = action;
-  if (entityType) filter.entityType = entityType;
+  if (hiddenActivityActions.includes(action) || entityType === 'auth') {
+    return res.json([]);
+  }
+
+  if (action) {
+    filter.action = action;
+  } else {
+    filter.action = { $nin: hiddenActivityActions };
+  }
+
+  if (entityType) {
+    filter.entityType = entityType;
+  } else {
+    filter.entityType = { $ne: 'auth' };
+  }
+
   if (business) filter.business = business;
   if (actorId) filter['actor.id'] = actorId;
   if (customerId) filter.customerId = customerId;
