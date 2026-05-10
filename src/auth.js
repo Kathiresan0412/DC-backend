@@ -12,7 +12,6 @@ export const hashPassword = async (password) => {
     const derivedKey = await scrypt(password, salt, 64);
     return `${salt}:${derivedKey.toString('hex')}`;
 };
-
 export const verifyPassword = async (password, passwordHash) => {
     const [salt, key] = passwordHash.split(':');
     if (!salt || !key) {

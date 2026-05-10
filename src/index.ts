@@ -58,6 +58,20 @@ const itemsCollection = async () => {
   return db.collection('items');
 };
 
+const describeStartupError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : 'Failed to connect to MongoDB.';
+
+  if (message.toLowerCase().includes('bad auth') || message.toLowerCase().includes('authentication failed')) {
+    return [
+      'MongoDB authentication failed.',
+      'Check the MONGODB_URI username and password in backend/.env.',
+      'If the password contains special characters, URL-encode it before putting it in the URI.',
+    ].join(' ');
+  }
+
+  return message;
+};
+
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
   const token = req.headers.authorization?.split(' ')[1];
 
@@ -349,14 +363,20 @@ app.delete('/api/items/:id', requireAuth, requireRole(['admin', 'manager']), asy
 });
 
 const startServer = async () => {
-  const db = await connectMongo();
-  await db.collection('users').createIndex({ email: 1 }, { unique: true });
-  console.log(`[mongo]: Connected to database ${db.databaseName}`);
-
   const server = app.listen(port, () => {
     console.log(`[server]: Server is running at http://localhost:${port}`);
   });
   const keepAliveInterval = setInterval(() => undefined, 60_000);
+
+  connectMongo()
+    .then(async (db) => {
+      await db.collection('users').createIndex({ email: 1 }, { unique: true });
+      console.log(`[mongo]: Connected to database ${db.databaseName}`);
+    })
+    .catch((error) => {
+      console.error(`[mongo]: ${describeStartupError(error)}`);
+      console.error('[mongo]: The server is still running; database-backed routes will fail until MONGODB_URI is fixed.');
+    });
 
   process.on('SIGTERM', () => {
     clearInterval(keepAliveInterval);
@@ -368,7 +388,6 @@ const startServer = async () => {
 };
 
 startServer().catch((error) => {
-  const message = error instanceof Error ? error.message : 'Failed to start server.';
-  console.error(`[server]: ${message}`);
+  console.error(`[server]: ${describeStartupError(error)}`);
   process.exit(1);
 });
