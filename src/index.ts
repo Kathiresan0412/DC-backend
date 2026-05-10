@@ -23,6 +23,7 @@ type AppUser = {
   status: UserStatus;
   phone?: string;
   bio?: string;
+  avatar_url?: string;
   created_at: Date;
   updated_at: Date;
 };
@@ -285,7 +286,7 @@ const initialServices: Omit<AppService, '_id' | 'created_at' | 'updated_at'>[] =
 ];
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 const publicUser = (user: AppUser) => ({
   id: user._id?.toString() || '',
@@ -295,9 +296,17 @@ const publicUser = (user: AppUser) => ({
   status: user.status,
   phone: user.phone || '',
   bio: user.bio || '',
+  avatar_url: user.avatar_url || '',
   created_at: user.created_at,
   updated_at: user.updated_at,
 });
+
+const isValidAvatarUrl = (value: string) => {
+  if (!value) return true;
+  if (value.length > 1_000_000) return false;
+
+  return /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value);
+};
 
 const usersCollection = async () => {
   const db = await getMongoDb();
@@ -723,10 +732,14 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/change-password', requireAuth, async (req: AuthRequest, res: Response) => {
-  const { password } = req.body;
+  const { currentPassword, password } = req.body;
 
   if (!req.user?._id) {
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  if (!currentPassword || !(await verifyPassword(String(currentPassword), req.user.password_hash))) {
+    return res.status(400).json({ error: 'Current password is incorrect.' });
   }
 
   if (!password || String(password).length < 6) {
@@ -755,9 +768,14 @@ app.put('/api/profile', requireAuth, async (req: AuthRequest, res: Response) => 
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  const { full_name, phone, bio } = req.body;
+  const { full_name, phone, bio, avatar_url } = req.body;
   const users = await usersCollection();
   const updatedAt = new Date();
+  const avatarUrl = typeof avatar_url === 'string' ? avatar_url : req.user.avatar_url || '';
+
+  if (!isValidAvatarUrl(avatarUrl)) {
+    return res.status(400).json({ error: 'Profile image must be a PNG, JPG, WebP, or GIF under 1MB.' });
+  }
 
   await users.updateOne(
     { _id: req.user._id },
@@ -766,6 +784,7 @@ app.put('/api/profile', requireAuth, async (req: AuthRequest, res: Response) => 
         full_name: full_name || req.user.full_name,
         phone: phone || '',
         bio: bio || '',
+        avatar_url: avatarUrl,
         updated_at: updatedAt,
       },
     },
@@ -823,12 +842,26 @@ app.post('/api/users', requireAuth, requireRole(['admin']), async (req: Request,
   res.status(201).json(publicUser(user));
 });
 
-app.patch('/api/users/:id', requireAuth, requireRole(['admin']), async (req: Request, res: Response) => {
+app.patch('/api/users/:id', requireAuth, requireRole(['admin']), async (req: AuthRequest, res: Response) => {
   const id = String(req.params.id);
   const { full_name, role, status } = req.body;
   const updates: Partial<Pick<AppUser, 'full_name' | 'role' | 'status' | 'updated_at'>> = {
     updated_at: new Date(),
   };
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid user id.' });
+  }
+
+  const isSelf = req.user?._id?.toString() === id;
+
+  if (isSelf && status === 'inactive') {
+    return res.status(400).json({ error: 'Admins cannot mark their own account inactive.' });
+  }
+
+  if (isSelf && role && role !== req.user?.role) {
+    return res.status(400).json({ error: 'Admins cannot change their own role.' });
+  }
 
   if (full_name) updates.full_name = full_name;
   if (role && allowedRoles.includes(role)) updates.role = role;
@@ -843,6 +876,32 @@ app.patch('/api/users/:id', requireAuth, requireRole(['admin']), async (req: Req
   }
 
   res.json(publicUser(user));
+});
+
+app.delete('/api/users/:id', requireAuth, requireRole(['admin']), async (req: AuthRequest, res: Response) => {
+  const id = String(req.params.id);
+
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'Invalid user id.' });
+  }
+
+  if (req.user?._id?.toString() === id) {
+    return res.status(400).json({ error: 'Admins cannot delete their own account.' });
+  }
+
+  const users = await usersCollection();
+  const user = await users.findOne({ _id: new ObjectId(id) });
+
+  if (!user) {
+    return res.status(404).json({ error: 'User not found.' });
+  }
+
+  if (user.status !== 'inactive') {
+    return res.status(400).json({ error: 'Only inactive users can be deleted.' });
+  }
+
+  await users.deleteOne({ _id: user._id });
+  res.status(204).send();
 });
 
 app.get('/api/items', requireAuth, async (_req: Request, res: Response) => {

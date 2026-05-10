@@ -506,9 +506,12 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ token, user: publicUser(user) });
 });
 app.post('/api/auth/change-password', requireAuth, async (req, res) => {
-    const { password } = req.body;
+    const { currentPassword, password } = req.body;
     if (!req.user?._id) {
         return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!currentPassword || !(await verifyPassword(String(currentPassword), req.user.password_hash))) {
+        return res.status(400).json({ error: 'Current password is incorrect.' });
     }
     if (!password || String(password).length < 6) {
         return res.status(400).json({ error: 'Password must be at least 6 characters.' });
@@ -586,6 +589,16 @@ app.patch('/api/users/:id', requireAuth, requireRole(['admin']), async (req, res
     const updates = {
         updated_at: new Date(),
     };
+    if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: 'Invalid user id.' });
+    }
+    const isSelf = req.user?._id?.toString() === id;
+    if (isSelf && status === 'inactive') {
+        return res.status(400).json({ error: 'Admins cannot mark their own account inactive.' });
+    }
+    if (isSelf && role && role !== req.user?.role) {
+        return res.status(400).json({ error: 'Admins cannot change their own role.' });
+    }
     if (full_name)
         updates.full_name = full_name;
     if (role && allowedRoles.includes(role))
@@ -599,6 +612,25 @@ app.patch('/api/users/:id', requireAuth, requireRole(['admin']), async (req, res
         return res.status(404).json({ error: 'User not found.' });
     }
     res.json(publicUser(user));
+});
+app.delete('/api/users/:id', requireAuth, requireRole(['admin']), async (req, res) => {
+    const id = String(req.params.id);
+    if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: 'Invalid user id.' });
+    }
+    if (req.user?._id?.toString() === id) {
+        return res.status(400).json({ error: 'Admins cannot delete their own account.' });
+    }
+    const users = await usersCollection();
+    const user = await users.findOne({ _id: new ObjectId(id) });
+    if (!user) {
+        return res.status(404).json({ error: 'User not found.' });
+    }
+    if (user.status !== 'inactive') {
+        return res.status(400).json({ error: 'Only inactive users can be deleted.' });
+    }
+    await users.deleteOne({ _id: user._id });
+    res.status(204).send();
 });
 app.get('/api/items', requireAuth, async (_req, res) => {
     const items = await itemsCollection();
