@@ -83,8 +83,7 @@ app.get('/api/db/health', async (_req, res) => {
         res.json({ connected: true, database: db.databaseName });
     }
     catch (error) {
-        const message = error instanceof Error ? error.message : 'MongoDB connection failed.';
-        res.status(500).json({ connected: false, error: message });
+        res.status(500).json({ connected: false, error: describeStartupError(error) });
     }
 });
 app.post('/api/auth/bootstrap', async (req, res) => {

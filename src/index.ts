@@ -122,8 +122,7 @@ app.get('/api/db/health', async (_req: Request, res: Response) => {
     await db.command({ ping: 1 });
     res.json({ connected: true, database: db.databaseName });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'MongoDB connection failed.';
-    res.status(500).json({ connected: false, error: message });
+    res.status(500).json({ connected: false, error: describeStartupError(error) });
   }
 });
 
