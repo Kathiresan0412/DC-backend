@@ -585,7 +585,7 @@ const requireRole = (roles: AppRole[]) => {
 };
 
 app.get('/', (_req: Request, res: Response) => {
-  res.send('ServiceHub API');
+  res.send('Primozen API');
 });
 
 app.get('/api/db/health', async (_req: Request, res: Response) => {

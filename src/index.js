@@ -413,7 +413,7 @@ const requireRole = (roles) => {
     };
 };
 app.get('/', (_req, res) => {
-    res.send('ServiceHub API');
+    res.send('Primozen API');
 });
 app.get('/api/db/health', async (_req, res) => {
     try {
