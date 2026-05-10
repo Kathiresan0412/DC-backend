@@ -1,0 +1,23 @@
+python3 -c "
+import urllib.request, os, re
+
+def download(url, base, local_base):
+    os.makedirs(local_base, exist_ok=True)
+    with urllib.request.urlopen(url) as r:
+        html = r.read().decode()
+    links = re.findall(r'href=\"([^\"]+)\"', html)
+    for link in links:
+        if link.startswith('?') or link.startswith('/..') or 'Parent' in link:
+            continue
+        full_url = url.rstrip('/') + '/' + link.lstrip('/')
+        local_path = os.path.join(local_base, link.lstrip('/'))
+        if link.endswith('/'):
+            download(full_url, base, local_path)
+        else:
+            print('Downloading:', full_url)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            urllib.request.urlretrieve(full_url, local_path)
+
+download('https://serviceprovider.nigherme.in/', 'https://serviceprovider.nigherme.in/', 'serviceprovider_nigherme')
+print('Done!')
+"
