@@ -2,9 +2,12 @@ import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import { ObjectId } from 'mongodb';
+import { createRequire } from 'node:module';
 import { closeMongo, connectMongo, getMongoDb } from './mongodb.js';
 import { hashPassword, signToken, verifyPassword, verifyToken } from './auth.js';
 dotenv.config();
+const require = createRequire(import.meta.url);
+const nodemailer = require('nodemailer');
 const app = express();
 const port = process.env.PORT || 5000;
 const allowedRoles = ['admin', 'manager', 'employee'];
@@ -333,6 +336,55 @@ const createEmailLog = ({ type, to, subject, body, }) => ({
     body,
     sent_at: new Date(),
 });
+const getSmtpTransport = () => {
+    const host = process.env.SMTP_HOST;
+    const port = Number(process.env.SMTP_PORT || 587);
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+    if (!host) {
+        throw new Error('SMTP_HOST is required to send invoice email.');
+    }
+    return nodemailer.createTransport({
+        host,
+        port,
+        secure: process.env.SMTP_SECURE === 'true' || port === 465,
+        auth: user && pass ? { user, pass } : undefined,
+    });
+};
+const sendEmail = async (email, html) => {
+    const from = process.env.SMTP_FROM || process.env.SMTP_USER;
+    if (!from) {
+        throw new Error('SMTP_FROM or SMTP_USER is required to send invoice email.');
+    }
+    const transport = getSmtpTransport();
+    await transport.sendMail({
+        from,
+        to: email.to,
+        subject: email.subject,
+        text: email.body,
+        html,
+        replyTo: process.env.SMTP_REPLY_TO || from,
+    });
+};
+const invoiceEmailHtml = (invoice) => `
+  <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
+    <h2 style="margin:0 0 12px">${invoice.business} invoice ${invoice.invoice_id}</h2>
+    <p>Hello ${invoice.customer},</p>
+    <p>Please review and confirm your ${invoice.service} invoice.</p>
+    <table style="border-collapse:collapse;margin:16px 0">
+      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Total</td><td style="padding:4px 0;font-weight:700">${formatMoney(invoice.amount)}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Paid</td><td style="padding:4px 0">${formatMoney(invoice.paid)}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Receivable</td><td style="padding:4px 0">${formatMoney(invoice.receivable)}</td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#6b7280">Due</td><td style="padding:4px 0">${invoice.due}</td></tr>
+    </table>
+    <p>
+      <a href="${invoice.agreementLink}" style="display:inline-block;background:#111827;color:#ffffff;text-decoration:none;padding:10px 14px;border-radius:6px">
+        Review and confirm invoice
+      </a>
+    </p>
+    <p style="color:#6b7280;font-size:13px">If the button does not work, open this link: ${invoice.agreementLink}</p>
+  </div>
+`;
 const normalizeCustomerPayload = (body, partial = false) => {
     const updates = {};
     const assignString = (field) => {
@@ -1280,12 +1332,22 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
         subject: `${invoice.business} invoice ${invoice.invoice_id}`,
         body: [
             `Hello ${invoice.customer},`,
-            `Please review and confirm your ${invoice.service} invoice for ${formatMoney(invoice.amount)}.`,
+            `Please review and confirm your ${invoice.service} invoice.`,
+            `Total amount: ${formatMoney(invoice.amount)}`,
+            `Paid amount: ${formatMoney(invoice.paid)}`,
+            `Receivable amount: ${formatMoney(invoice.receivable)}`,
             `Agreement link: ${invoice.agreementLink}`,
         ].join('\n\n'),
     });
+    try {
+        await sendEmail(email, invoiceEmailHtml(invoice));
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to send invoice email.';
+        return res.status(500).json({ error: message });
+    }
     await invoices.updateOne({ _id: invoice._id }, {
-        $set: { status: 'Sent', updated_at: new Date() },
+        $set: { status: invoice.status === 'Draft' ? 'Sent' : invoice.status, updated_at: new Date() },
         $push: { emails: email },
     });
     const updatedInvoice = await invoices.findOne({ _id: invoice._id });
@@ -1306,7 +1368,7 @@ app.post('/api/invoices/:id/send', requireAuth, requireRole(['admin', 'manager']
             to: invoice.email,
             subject: email.subject,
             previousStatus: invoice.status,
-            nextStatus: 'Sent',
+            nextStatus: invoice.status === 'Draft' ? 'Sent' : invoice.status,
             agreementLink: invoice.agreementLink,
         },
     });
