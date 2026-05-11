@@ -15,6 +15,18 @@ const allowedStatuses = ['active', 'inactive'];
 const allowedCustomerStatuses = ['Active', 'Due', 'New lead'];
 const allowedServiceStatuses = ['Active', 'Inactive'];
 const allowedInvoiceStatuses = ['Draft', 'Sent', 'Confirmed', 'Paid', 'Due', 'Overdue'];
+const getEnv = (name, fallback) => (process.env[name] || fallback).trim();
+const getPublicAppName = () => getEnv('PUBLIC_APP_NAME', 'Primozen');
+const businessDetailsFor = (business) => {
+    const isFrozen = business === 'Frozen Solution';
+    return {
+        name: business,
+        email: isFrozen ? getEnv('FROZEN_SOLUTION_EMAIL', 'frozensolutions92@gmail.com') : getEnv('PRIMECUT_SERVICES_EMAIL', 'freshcutservices92@gmail.com'),
+        phone: isFrozen ? getEnv('FROZEN_SOLUTION_PHONE', '+1 647-212-3424') : getEnv('PRIMECUT_SERVICES_PHONE', '+1 647-765-0949'),
+        secondaryPhone: isFrozen ? getEnv('FROZEN_SOLUTION_SECONDARY_PHONE', '+1 647-854-5652') : getEnv('PRIMECUT_SERVICES_SECONDARY_PHONE', '+1 647-854-5652'),
+        serviceArea: isFrozen ? getEnv('FROZEN_SOLUTION_SERVICE_AREA', 'Residential driveway & sidewalk') : getEnv('PRIMECUT_SERVICES_SERVICE_AREA', 'Residential driveway & yard'),
+    };
+};
 const flyerTrustPoints = [
     'Complete & modern equipment',
     'Competitive & affordable price',
@@ -32,10 +44,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential driveway & sidewalk'],
         trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
-        serviceArea: 'Residential driveway & sidewalk',
-        contactPhone: '+1 647-212-3424',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'frozensolutions92@gmail.com',
+        serviceArea: businessDetailsFor('Frozen Solution').serviceArea,
+        contactPhone: businessDetailsFor('Frozen Solution').phone,
+        secondaryPhone: businessDetailsFor('Frozen Solution').secondaryPhone,
+        email: businessDetailsFor('Frozen Solution').email,
         source: 'Snow Removal Service flyer',
     },
     {
@@ -48,10 +60,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential & commercial service'],
         trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
-        serviceArea: 'Residential driveway & sidewalk',
-        contactPhone: '+1 647-212-3424',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'frozensolutions92@gmail.com',
+        serviceArea: businessDetailsFor('Frozen Solution').serviceArea,
+        contactPhone: businessDetailsFor('Frozen Solution').phone,
+        secondaryPhone: businessDetailsFor('Frozen Solution').secondaryPhone,
+        email: businessDetailsFor('Frozen Solution').email,
         source: 'Snow Removal Service flyer',
     },
     {
@@ -64,10 +76,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential driveway & sidewalk'],
         trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
-        serviceArea: 'Residential driveway & sidewalk',
-        contactPhone: '+1 647-212-3424',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'frozensolutions92@gmail.com',
+        serviceArea: businessDetailsFor('Frozen Solution').serviceArea,
+        contactPhone: businessDetailsFor('Frozen Solution').phone,
+        secondaryPhone: businessDetailsFor('Frozen Solution').secondaryPhone,
+        email: businessDetailsFor('Frozen Solution').email,
         source: 'Snow Removal Service flyer',
     },
     {
@@ -80,10 +92,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Service available 24/7'],
         trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
-        serviceArea: 'Residential driveway & sidewalk',
-        contactPhone: '+1 647-212-3424',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'frozensolutions92@gmail.com',
+        serviceArea: businessDetailsFor('Frozen Solution').serviceArea,
+        contactPhone: businessDetailsFor('Frozen Solution').phone,
+        secondaryPhone: businessDetailsFor('Frozen Solution').secondaryPhone,
+        email: businessDetailsFor('Frozen Solution').email,
         source: 'Snow Removal Service flyer',
     },
     {
@@ -96,10 +108,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Silver $400 monthly', 'Gold $900 monthly', 'Residential & commercial service'],
         trustPoints: [...flyerTrustPoints, 'Serving the city since 2024'],
-        serviceArea: 'Residential driveway & sidewalk',
-        contactPhone: '+1 647-212-3424',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'frozensolutions92@gmail.com',
+        serviceArea: businessDetailsFor('Frozen Solution').serviceArea,
+        contactPhone: businessDetailsFor('Frozen Solution').phone,
+        secondaryPhone: businessDetailsFor('Frozen Solution').secondaryPhone,
+        email: businessDetailsFor('Frozen Solution').email,
         source: 'Snow Removal Service flyer',
     },
     {
@@ -112,10 +124,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Residential driveway & yard'],
         trustPoints: flyerTrustPoints,
-        serviceArea: 'Residential driveway & yard',
-        contactPhone: '+1 647-765-0949',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'freshcutservices92@gmail.com',
+        serviceArea: businessDetailsFor('Primecut Services').serviceArea,
+        contactPhone: businessDetailsFor('Primecut Services').phone,
+        secondaryPhone: businessDetailsFor('Primecut Services').secondaryPhone,
+        email: businessDetailsFor('Primecut Services').email,
         source: 'Fresh Cut Services flyer',
     },
     {
@@ -128,10 +140,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Residential driveway & yard'],
         trustPoints: flyerTrustPoints,
-        serviceArea: 'Residential driveway & yard',
-        contactPhone: '+1 647-765-0949',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'freshcutservices92@gmail.com',
+        serviceArea: businessDetailsFor('Primecut Services').serviceArea,
+        contactPhone: businessDetailsFor('Primecut Services').phone,
+        secondaryPhone: businessDetailsFor('Primecut Services').secondaryPhone,
+        email: businessDetailsFor('Primecut Services').email,
         source: 'Fresh Cut Services flyer',
     },
     {
@@ -144,10 +156,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Residential driveway & yard'],
         trustPoints: flyerTrustPoints,
-        serviceArea: 'Residential driveway & yard',
-        contactPhone: '+1 647-765-0949',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'freshcutservices92@gmail.com',
+        serviceArea: businessDetailsFor('Primecut Services').serviceArea,
+        contactPhone: businessDetailsFor('Primecut Services').phone,
+        secondaryPhone: businessDetailsFor('Primecut Services').secondaryPhone,
+        email: businessDetailsFor('Primecut Services').email,
         source: 'Fresh Cut Services flyer',
     },
     {
@@ -160,10 +172,10 @@ const initialServices = [
         status: 'Active',
         includes: ['Residential driveway & yard'],
         trustPoints: flyerTrustPoints,
-        serviceArea: 'Residential driveway & yard',
-        contactPhone: '+1 647-765-0949',
-        secondaryPhone: '+1 647-854-5652',
-        email: 'freshcutservices92@gmail.com',
+        serviceArea: businessDetailsFor('Primecut Services').serviceArea,
+        contactPhone: businessDetailsFor('Primecut Services').phone,
+        secondaryPhone: businessDetailsFor('Primecut Services').secondaryPhone,
+        email: businessDetailsFor('Primecut Services').email,
         source: 'Fresh Cut Services flyer',
     },
 ];
@@ -337,16 +349,6 @@ const escapeHtml = (value) => String(value ?? '')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
-const businessDetailsFor = (business) => {
-    const isFrozen = business === 'Frozen Solution';
-    return {
-        name: business,
-        email: isFrozen ? 'frozensolutions92@gmail.com' : 'freshcutservices92@gmail.com',
-        phone: isFrozen ? '+1 647-212-3424' : '+1 647-765-0949',
-        secondaryPhone: '+1 647-854-5652',
-        serviceArea: isFrozen ? 'Residential driveway & sidewalk' : 'Residential driveway & yard',
-    };
-};
 const createEmailLog = ({ type, to, subject, body, }) => ({
     type,
     to,
@@ -830,6 +832,27 @@ app.get('/api/db/health', async (_req, res) => {
     catch (error) {
         res.status(500).json({ connected: false, error: describeStartupError(error) });
     }
+});
+app.get('/api/public/config', (_req, res) => {
+    res.json({
+        appName: getPublicAppName(),
+        businesses: [
+            {
+                key: 'snow',
+                service: 'Snow Removal',
+                image: '/hero-snow-service.png',
+                accent: 'text-sky-700 bg-sky-500/10',
+                ...businessDetailsFor('Frozen Solution'),
+            },
+            {
+                key: 'lawn',
+                service: 'Fresh Cut Services',
+                image: '/hero-lawn-service.png',
+                accent: 'text-emerald-700 bg-emerald-500/10',
+                ...businessDetailsFor('Primecut Services'),
+            },
+        ],
+    });
 });
 app.post('/api/auth/bootstrap', async (req, res) => {
     const users = await usersCollection();
@@ -1340,6 +1363,20 @@ app.get('/api/services', requireAuth, async (_req, res) => {
     const services = await servicesCollection();
     const data = await services.find({}).sort({ business: 1, category: 1, name: 1 }).toArray();
     res.json(data.map(publicService));
+});
+app.get('/api/public/services', async (_req, res) => {
+    const services = await servicesCollection();
+    const data = await services.find({ status: 'Active' }).sort({ business: 1, category: 1, name: 1 }).toArray();
+    res.json(data.map((service) => {
+        const business = businessDetailsFor(service.business);
+        return publicService({
+            ...service,
+            contactPhone: business.phone,
+            secondaryPhone: business.secondaryPhone,
+            email: business.email,
+            serviceArea: service.serviceArea || business.serviceArea,
+        });
+    }));
 });
 app.post('/api/services', requireAuth, requireRole(['admin', 'manager']), async (req, res) => {
     try {
